@@ -356,7 +356,7 @@ class ServerRequestHandler(http.server.SimpleHTTPRequestHandler):
             tasks.append(self.handle_sse_stream())
         global use_chromadb
         if use_chromadb == True:
-            newprompt = query_chromadb(newprompt, genparams.get('stop_sequence', []), maxctx)
+            newprompt = query_chromadb(newprompt, genparams.get('stop_sequence', []), maxctx, genparams.get('max_length', 50))
         generate_task = asyncio.create_task(self.generate_text(newprompt, genparams, basic_api_flag, stream_flag))
         tasks.append(generate_task)
 
