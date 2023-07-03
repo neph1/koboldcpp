@@ -7,8 +7,8 @@ import os
 import argparse
 import json, sys, http.server, time, asyncio, socket, threading
 from concurrent.futures import ThreadPoolExecutor
-import koboldcpp_chromadb
-from koboldcpp_chromadb import init_chromadb, query_chromadb
+import importlib
+import extension
 
 stop_token_max = 10
 
@@ -241,6 +241,8 @@ defaultport = 5001
 KcppVersion = "1.34"
 showdebug = True
 use_chromadb = False
+extension = None
+extensions = []
 
 class ServerRequestHandler(http.server.SimpleHTTPRequestHandler):
     sys_version = ""
@@ -354,9 +356,9 @@ class ServerRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         if stream_flag:
             tasks.append(self.handle_sse_stream())
-        global use_chromadb
-        if use_chromadb == True:
-            newprompt = query_chromadb(newprompt, genparams.get('stop_sequence', []), maxctx, genparams.get('max_length', 50))
+        global extension
+        for extension in extensions:
+            newprompt = extension.inference(newprompt, genparams, genparams.get('max_context_length', maxctx))
         generate_task = asyncio.create_task(self.generate_text(newprompt, genparams, basic_api_flag, stream_flag))
         tasks.append(generate_task)
 
@@ -723,6 +725,12 @@ def show_gui():
             time.sleep(2)
             sys.exit(2)
 
+def load_extension(extension_name : str):
+    global extensions
+    module = importlib.import_module(f'extensions.{extension_name}')
+    extensions.append(getattr(module, extension_name)())
+    print(f'initializing {extension}' )
+
 def main(args):
 
     embedded_kailite = None
@@ -833,11 +841,11 @@ def main(args):
     else:
         epurl = f"http://{args.host}:{args.port}"
 
-    if args.chromadb:
-        global use_chromadb
-        use_chromadb = True
-        
-        init_chromadb()
+    if args.extensions:
+        ext_strings = args.extensions.split()
+        for ext in ext_strings:
+            load_extension(ext)
+            
     if args.launch:
         try:
             import webbrowser as wb
@@ -886,6 +894,6 @@ if __name__ == '__main__':
     compatgroup.add_argument("--useclblast", help="Use CLBlast for GPU Acceleration. Must specify exactly 2 arguments, platform ID and device ID (e.g. --useclblast 1 0).", type=int, choices=range(0,9), nargs=2)
     compatgroup.add_argument("--usecublas", help="Use CuBLAS for GPU Acceleration. Requires Nvidia GPU. Select lowvram to not allocate VRAM scratch buffer.", default='', const='normal', nargs='?', choices=['normal', 'lowvram'])
     parser.add_argument("--gpulayers", help="Set number of layers to offload to GPU when using GPU. Requires GPU.",metavar=('[GPU layers]'), type=int, default=0)
-    parser.add_argument("--chromadb", help="Use chromadb for lookups. Requires chromadb", action='store_true')
+    parser.add_argument("--extensions", help="Load extensions, space separated")
     args = parser.parse_args()
     main(args)
