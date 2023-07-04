@@ -8,6 +8,7 @@ struct load_model_inputs
     const int max_context_length;
     const int batch_size;
     const bool f16_kv;
+    const bool low_vram;
     const char * executable_path;
     const char * model_filename;
     const char * lora_filename;
@@ -18,7 +19,7 @@ struct load_model_inputs
     const bool unban_tokens;
     const int clblast_info = 0;
     const int blasbatchsize = 512;
-    const bool debugmode;
+    const int debugmode = 0;
     const int forceversion = 0;
     const int gpulayers = 0;
 };

@@ -12,11 +12,17 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <algorithm>
 
-
+#ifdef GGML_USE_CUBLAS
+#include "ggml-cuda.h"
+#endif
+#if defined(GGML_USE_CLBLAST)
+#include "ggml-opencl.h"
+#endif
 
 // load the model's weights from a file
-ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & model, gpt_vocab & vocab, FileFormat file_format) {
+ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & model, gpt_vocab & vocab, FileFormat file_format, int gpulayers) {
     printf("%s: loading model from '%s' - please wait ...\n", __func__, fname.c_str());
 
     auto fin = std::ifstream(fname, std::ios::binary);
@@ -35,30 +41,25 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
         }
     }
 
+    int32_t origmaxctx = model.hparams.n_ctx;
+
     // load hparams
     {
         auto & hparams = model.hparams;
-        hparams.par_res = 1; //true
+
         fin.read((char *) &hparams.n_vocab, sizeof(hparams.n_vocab));
         fin.read((char *) &hparams.n_ctx,   sizeof(hparams.n_ctx));
         fin.read((char *) &hparams.n_embd,  sizeof(hparams.n_embd));
         fin.read((char *) &hparams.n_head,  sizeof(hparams.n_head));
         fin.read((char *) &hparams.n_layer, sizeof(hparams.n_layer));
         fin.read((char *) &hparams.n_rot,   sizeof(hparams.n_rot));
-        if(file_format!=FileFormat::NEOX_1 && file_format!=FileFormat::NEOX_2 && file_format!=FileFormat::NEOX_3)
-        {
-            fin.read((char *) &hparams.par_res, sizeof(hparams.par_res));
-        }
-        if(file_format==FileFormat::NEOX_3)
-        {
-            hparams.par_res = 0;
-        }
+        fin.read((char *) &hparams.par_res, sizeof(hparams.par_res));
         fin.read((char *) &hparams.ftype,   sizeof(hparams.ftype));
 
         const int32_t qntvr = hparams.ftype / GGML_QNT_VERSION_FACTOR;
 
         printf("%s: n_vocab = %d\n", __func__, hparams.n_vocab);
-        printf("%s: n_ctx   = %d\n", __func__, hparams.n_ctx);
+        printf("%s: n_ctx   = %d (%d)\n", __func__, hparams.n_ctx,origmaxctx);
         printf("%s: n_embd  = %d\n", __func__, hparams.n_embd);
         printf("%s: n_head  = %d\n", __func__, hparams.n_head);
         printf("%s: n_layer = %d\n", __func__, hparams.n_layer);
@@ -66,6 +67,8 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
         printf("%s: par_res = %d\n", __func__, hparams.par_res);
         printf("%s: ftype   = %d\n", __func__, hparams.ftype);
         printf("%s: qntvr   = %d\n", __func__, qntvr);
+
+        hparams.n_ctx = std::max(origmaxctx,hparams.n_ctx);
 
         hparams.ftype %= GGML_QNT_VERSION_FACTOR;
     }
@@ -107,10 +110,10 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
     {
         const auto & hparams = model.hparams;
 
-        const int n_embd  = hparams.n_embd;
-        const int n_layer = hparams.n_layer;
-        const int n_ctx   = hparams.n_ctx;
-        const int n_vocab = hparams.n_vocab;
+        const size_t n_embd  = hparams.n_embd;
+        const size_t n_layer = hparams.n_layer;
+        const size_t n_ctx   = hparams.n_ctx;
+        const size_t n_vocab = hparams.n_vocab;
 
         ctx_size += n_embd*ggml_type_sizef(GGML_TYPE_F32); // ln_f_g
         ctx_size += n_embd*ggml_type_sizef(GGML_TYPE_F32); // ln_f_b
@@ -138,10 +141,10 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
         ctx_size += n_layer*(4*n_embd*n_embd*ggml_type_sizef(wtype));         // c_mlp_proj_w
         ctx_size += n_layer*(         n_embd*ggml_type_sizef(GGML_TYPE_F32)); // c_mlp_proj_b
 
-        ctx_size += n_ctx*n_layer*n_embd*ggml_type_sizef(GGML_TYPE_F16); // memory_k
-        ctx_size += n_ctx*n_layer*n_embd*ggml_type_sizef(GGML_TYPE_F16); // memory_v
+        ctx_size += std::max((size_t)origmaxctx,n_ctx)*n_layer*n_embd*ggml_type_sizef(GGML_TYPE_F16); // memory_k
+        ctx_size += std::max((size_t)origmaxctx,n_ctx)*n_layer*n_embd*ggml_type_sizef(GGML_TYPE_F16); // memory_v
 
-        ctx_size += (6 + 16*n_layer)*512; // object overhead
+        ctx_size += (6 + 16*n_layer)*1024; // object overhead
 
         printf("%s: ggml ctx size = %6.2f MB\n", __func__, ctx_size/(1024.0*1024.0));
     }
@@ -152,7 +155,7 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
         params.mem_size   = ctx_size;
         params.mem_buffer = NULL;
         params.no_alloc   = false;
-        
+
         model.ctx = ggml_init(params);
         if (!model.ctx) {
             fprintf(stderr, "%s: ggml_init() failed\n", __func__);
@@ -237,7 +240,7 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
         const int n_layer = hparams.n_layer;
         const int n_ctx   = hparams.n_ctx;
 
-        const int64_t n_mem      = n_layer*n_ctx;
+        const int64_t n_mem      = n_layer*std::max(origmaxctx,n_ctx);
         const int64_t n_elements = n_embd*n_mem;
 
         model.memory_k = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
@@ -300,22 +303,7 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
                 printf("%24s - [%5d, %5d], type = %6s, %6.2f MB, %9zu bytes\n", name.data(), ne[0], ne[1], ggml_type_name(ggml_type(ttype)), ggml_nbytes(tensor)/1024.0/1024.0, ggml_nbytes(tensor));
             }
 
-            size_t bpe = ggml_type_size(ggml_type(ttype));
-
-            if(file_format==FileFormat::NEOX_1)
-            {
-                switch (ttype) {
-                    case 0: bpe = ggml_type_size(GGML_TYPE_F32);  break;
-                    case 1: bpe = ggml_type_size(GGML_TYPE_F16);  break;
-                    case 2: bpe = ggml_type_size(GGML_TYPE_Q4_0); assert(ne[0] % 64 == 0); break;
-                    case 3: bpe = ggml_type_size(GGML_TYPE_Q4_1); assert(ne[0] % 64 == 0); break;
-                    default:
-                    {
-                        fprintf(stderr, "%s: unknown ftype %d in model file\n", __func__, ttype);
-                        return ModelLoadResult::FAIL;
-                    }
-                };
-            }
+            const size_t bpe = ggml_type_size(ggml_type(ttype));
 
             if ((nelements*bpe)/ggml_blck_size(tensor->type) != ggml_nbytes(tensor)) {
                 fprintf(stderr, "%s: tensor '%s' has wrong size in model file: got %zu, expected %zu\n",
@@ -339,6 +327,36 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
     }
 
     fin.close();
+
+    //gpu offload
+    #if defined(GGML_USE_CLBLAST) || defined(GGML_USE_CUBLAS)
+    if(gpulayers>0)
+    {
+        const auto & hparams = model.hparams;
+        size_t vram_total = 0;
+        const int n_gpu = std::min(gpulayers, int(hparams.n_layer));
+        fprintf(stderr, "%s: [opencl] offloading %d layers to GPU\n", __func__, n_gpu);
+        for (int i = 0; i < n_gpu; ++i) {
+            const auto & layer = model.layers[i];
+            layer.c_attn_attn_w->backend = GGML_BACKEND_GPU;
+            layer.c_attn_proj_w->backend = GGML_BACKEND_GPU;
+            layer.c_mlp_fc_w->backend = GGML_BACKEND_GPU;
+            layer.c_mlp_proj_w->backend = GGML_BACKEND_GPU;
+            #if defined(GGML_USE_CLBLAST)
+            ggml_cl_transform_tensor(layer.c_attn_attn_w->data,layer.c_attn_attn_w); vram_total += ggml_nbytes(layer.c_attn_attn_w);
+            ggml_cl_transform_tensor(layer.c_attn_proj_w->data,layer.c_attn_proj_w); vram_total += ggml_nbytes(layer.c_attn_proj_w);
+            ggml_cl_transform_tensor(layer.c_mlp_fc_w->data,layer.c_mlp_fc_w); vram_total += ggml_nbytes(layer.c_mlp_fc_w);
+            ggml_cl_transform_tensor(layer.c_mlp_proj_w->data,layer.c_mlp_proj_w); vram_total += ggml_nbytes(layer.c_mlp_proj_w);
+            #else
+            ggml_cuda_transform_tensor(layer.c_attn_attn_w->data,layer.c_attn_attn_w); vram_total += ggml_nbytes(layer.c_attn_attn_w);
+            ggml_cuda_transform_tensor(layer.c_attn_proj_w->data,layer.c_attn_proj_w); vram_total += ggml_nbytes(layer.c_attn_proj_w);
+            ggml_cuda_transform_tensor(layer.c_mlp_fc_w->data,layer.c_mlp_fc_w); vram_total += ggml_nbytes(layer.c_mlp_fc_w);
+            ggml_cuda_transform_tensor(layer.c_mlp_proj_w->data,layer.c_mlp_proj_w); vram_total += ggml_nbytes(layer.c_mlp_proj_w);
+            #endif
+        }
+        fprintf(stderr, "%s: [opencl] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
+    }
+    #endif
 
     return ModelLoadResult::SUCCESS;
 }
@@ -394,7 +412,8 @@ bool gpt_neox_eval(
         const int n_past,
         const std::vector<gpt_vocab::id> & embd_inp,
               std::vector<float>         & embd_w,
-              size_t                     & mem_per_token) {
+              size_t                     & mem_per_token,
+              bool use_scratch) {
     const int N = embd_inp.size();
 
     const auto & hparams = model.hparams;
@@ -409,8 +428,16 @@ bool gpt_neox_eval(
     static size_t buf_size = 256u*1024*1024;
     static void * buf = malloc(buf_size);
 
+    // use 2 scratch buffers
+    // TODO: very hacky solution - reimplement in a more elegant way
+    static size_t scr0_size = (n_embd>2400?512u:256u)*1024*1024;
+    static size_t scr1_size = (n_embd>2400?512u:256u)*1024*1024;
+
+    static void * scr0 = malloc(scr0_size);
+    static void * scr1 = malloc(scr1_size);
+
     if (mem_per_token > 0 && (mem_per_token*N*2 + 64u*1024*1024) > buf_size) {
-        const size_t buf_size_new = 360u*1024*1024 + 1.6*(mem_per_token*N); // add 10% to account for ggml object overhead
+        const size_t buf_size_new = 360u*1024*1024 + 1.2*(mem_per_token*N); // add 10% to account for ggml object overhead
         //printf("\n%s: reallocating buffer from %zu to %zu bytes\n", __func__, buf_size, buf_size_new);
 
         // reallocate
@@ -420,7 +447,7 @@ bool gpt_neox_eval(
             buf = realloc(buf, buf_size);
             if (buf == nullptr)
             {
-                fprintf(stderr, "%s: failed to allocate %zu bytes\n", __func__, buf_size);
+                fprintf(stderr, "%s: failed to allocate %zu bytes. Try reducing batch size.\n", __func__, buf_size);
                 return false;
             }
         }
@@ -430,7 +457,7 @@ bool gpt_neox_eval(
     params.mem_size   = buf_size;
     params.mem_buffer = buf;
     params.no_alloc   = false;
-    
+
 
     struct ggml_context * ctx0 = ggml_init(params);
     struct ggml_cgraph gf = {};
@@ -444,6 +471,10 @@ bool gpt_neox_eval(
 
     for (int il = 0; il < n_layer; ++il) {
         struct ggml_tensor * cur;
+
+        if(use_scratch){
+        ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
+        }
 
         // self-attention
         {
@@ -473,8 +504,8 @@ bool gpt_neox_eval(
             struct ggml_tensor * Vcur = ggml_cont(ctx0, ggml_view_3d(ctx0, cur, n_embd/n_head, n_head, N, cur->nb[1]/n_head, cur->nb[1], 2*sizeof(float)*n_embd/n_head));
 
             // using mode = 2 for GPT-NeoX mode
-            Qcur = ggml_rope_inplace(ctx0, Qcur, n_past, n_rot, 2);
-            Kcur = ggml_rope_inplace(ctx0, Kcur, n_past, n_rot, 2);
+            Qcur = ggml_rope_inplace(ctx0, Qcur, n_past, n_rot, 2, n_ctx);
+            Kcur = ggml_rope_inplace(ctx0, Kcur, n_past, n_rot, 2, n_ctx);
 
             // store key and value to memory
             {
@@ -548,6 +579,10 @@ bool gpt_neox_eval(
             }
         }
 
+        if(use_scratch){
+        ggml_set_scratch(ctx0, { 0, scr1_size, scr1, });
+        }
+
         if (hparams.par_res == 0) {
             struct ggml_tensor * inpFF = ggml_add(ctx0, cur, inpL);
 
@@ -570,6 +605,10 @@ bool gpt_neox_eval(
         }
     }
 
+    if(use_scratch){
+    ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
+    }
+
     // norm
     {
         inpL = ggml_norm(ctx0, inpL);
@@ -580,6 +619,10 @@ bool gpt_neox_eval(
                     ggml_repeat(ctx0, model.ln_f_g, inpL),
                     inpL),
                 ggml_repeat(ctx0, model.ln_f_b, inpL));
+    }
+
+    if(use_scratch){
+    ggml_set_scratch(ctx0, { 0, 0, nullptr, });
     }
 
     // lm_head

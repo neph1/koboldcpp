@@ -9,11 +9,14 @@
 #include "llama_v2.h"
 
 #include "ggml_v2.h"
+
 #ifdef GGML_USE_CUBLAS
 #include "ggml_v2-cuda.h"
-#elif defined(GGML_USE_CLBLAST)
+#endif
+#if defined(GGML_USE_CLBLAST)
 #include "ggml_v2-opencl.h"
 #endif
+
 
 #include <array>
 #include <ctime>
@@ -59,7 +62,7 @@ static const std::map<e_model2, size_t> & MEM_REQ_SCRATCH0_2()
         { MODEL_UNKNOWN_2, 512ull * MB_2 },
         { MODEL_7B_2,    512ull * MB_2 },
         { MODEL_13B_2,   512ull * MB_2 },
-        { MODEL_30B_2,   512ull * MB_2 },
+        { MODEL_30B_2,   640ull * MB_2 },
         { MODEL_65B_2,  1024ull * MB_2 },
     };
     return k_sizes;
@@ -71,7 +74,7 @@ static const std::map<e_model2, size_t> & MEM_REQ_SCRATCH1_2()
         { MODEL_UNKNOWN_2, 512ull * MB_2 },
         { MODEL_7B_2,    512ull * MB_2 },
         { MODEL_13B_2,   512ull * MB_2 },
-        { MODEL_30B_2,   512ull * MB_2 },
+        { MODEL_30B_2,   640ull * MB_2 },
         { MODEL_65B_2,  1024ull * MB_2 },
     };
     return k_sizes;
@@ -1063,6 +1066,8 @@ static void llama_v2_model_load_internal(
 #if defined(GGML_USE_CUBLAS)
     {
         const int n_gpu = std::min(n_gpu_layers, int(hparams.n_layer));
+        if(GetQuantsUnshuffled())
+        {
 
         fprintf(stderr, "%s: [old cublas] offloading %d layers to GPU\n", __func__, n_gpu);
 
@@ -1085,6 +1090,14 @@ static void llama_v2_model_load_internal(
         }
 
         fprintf(stderr, "%s: [old cublas] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
+        }
+        else
+        {
+            if(n_gpu>0)
+            {
+                printf("\n[WARNING: Old format does not support GPU offloading! It will be deactivated!]\n");
+            }
+        }
     }
 #elif defined(GGML_USE_CLBLAST)
     {
@@ -2191,7 +2204,7 @@ struct llama_v2_context * llama_v2_init_from_file(
 
     llama_v2_context * ctx = new llama_v2_context;
 
-    if (params.seed < 0) {
+    if (params.seed < 0 || params.seed==0xFFFFFFFF) {
         params.seed = time(NULL);
     }
 
@@ -2539,7 +2552,7 @@ int llama_v2_get_kv_cache_token_count(const struct llama_v2_context * ctx) {
 #define LLAMA_V2_MAX_RNG_STATE (64*1024)
 
 void llama_v2_set_rng_seed(struct llama_v2_context * ctx, int seed) {
-    if (seed < 0) {
+    if (seed < 0 || seed==0xFFFFFFFF) {
         seed = time(NULL);
     }
     ctx->rng.seed(seed);

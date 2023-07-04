@@ -68,7 +68,7 @@ static int n_batch = 8;
 static bool useSmartContext = false;
 static bool unbanTokens = false;
 static int blasbatchsize = 512;
-static bool debugmode = false;
+static int debugmode = 0; //-1 = hide all, 0 = normal, 1 = showall
 static std::string modelname;
 static std::vector<gpt_vocab::id> last_n_tokens;
 static std::vector<gpt_vocab::id> current_context_tokens;
@@ -78,6 +78,7 @@ static std::vector<int> smartcontext;
 static std::vector<std::string> stop_sequence;
 static std::vector<llama_token_data> top_picks;
 static int remaining_tokens = 0;
+static int stopper_unused_tokens = 0;
 static std::string concat_output = "";
 
 inline bool IsNanCheck(float f)
@@ -118,7 +119,7 @@ llama_token sample_token(llama_token_data_array * candidates, std::mt19937 & rng
     std::discrete_distribution<> dist(probs.begin(), probs.end());
     int idx = dist(rng);
 
-    if(debugmode)
+    if(debugmode==1)
     {
         top_picks.push_back(candidates->data[idx]);
         for (size_t i = 0; (i < candidates->size && i<4); ++i)
@@ -308,8 +309,13 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     params.memory_f16 = inputs.f16_kv;
     params.n_ctx = inputs.max_context_length;
 
-    neox_ctx_v2.hparams.n_ctx = gptj_ctx_v1.hparams.n_ctx = gptj_ctx_v2.hparams.n_ctx = gpt2_ctx_v1.hparams.n_ctx = gpt2_ctx_v2.hparams.n_ctx
-    = neox_ctx_v3.hparams.n_ctx = gptj_ctx_v3.hparams.n_ctx = gptj_ctx_v3.hparams.n_ctx = mpt_ctx_v3.hparams.n_ctx = params.n_ctx;
+    neox_ctx_v2.hparams.n_ctx  = neox_ctx_v3.hparams.n_ctx
+    = gptj_ctx_v1.hparams.n_ctx = gptj_ctx_v2.hparams.n_ctx = gptj_ctx_v3.hparams.n_ctx
+    = gpt2_ctx_v1.hparams.n_ctx = gpt2_ctx_v2.hparams.n_ctx = gpt2_ctx_v3.hparams.n_ctx
+    = mpt_ctx_v3.hparams.n_ctx = params.n_ctx;
+
+    //this is used for the mem_per_token eval, openblas needs more RAM
+    bool use_scratch = ggml_cpu_has_gpublas();
 
     printf("System Info: %s\n", llama_print_system_info());
     SetQuantsUnshuffled(false);
@@ -371,6 +377,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         //llama_ctx_paran_parts = -1;
         llama_ctx_params.seed = -1;
         llama_ctx_params.f16_kv = inputs.f16_kv;
+        llama_ctx_params.low_vram = inputs.low_vram;
         llama_ctx_params.logits_all = false;
         llama_ctx_params.use_mmap = inputs.use_mmap;
         llama_ctx_params.use_mlock = inputs.use_mlock;
@@ -387,9 +394,15 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         {
             printf("\nAttempting to apply LORA adapter: %s\n", lora_filename.c_str());
 
+            const char * lora_base_arg = NULL;
+            if (lora_base != "") {
+                printf("Using LORA base model: %s\n", lora_base.c_str());
+                lora_base_arg = lora_base.c_str();
+            }
+
             int err = llama_apply_lora_from_file(llama_ctx_v3,
                                                  lora_filename.c_str(),
-                                                 NULL,
+                                                 lora_base_arg,
                                                  n_threads);
             if (err != 0)
             {
@@ -418,6 +431,12 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         else //rwkv_2
         {
             rwkv_ctx_v3 = rwkv_init_from_file(modelname.c_str(), n_threads);
+
+            // if(inputs.gpulayers>0)
+            // {
+            //     rwkv_gpu_offload_layers(rwkv_ctx_v3,inputs.gpulayers);
+            // }
+
             const struct rwkv_file_header & header = rwkv_ctx_v3->instance->model.header;
             const size_t n_vocab = header.n_vocab;
             printf("\nDetected Vocab: %d",n_vocab);
@@ -539,7 +558,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
                 return res;
             }
             // determine the required inference memory per token:
-            gpt2_eval(gpt2_ctx_v3, params.n_threads, 0, { 0, 1, 2, 3 }, logits, mem_per_token, file_format);
+            gpt2_eval(gpt2_ctx_v3, params.n_threads, 0, { 0, 1, 2, 3 }, logits, mem_per_token, use_scratch);
             return ModelLoadResult::SUCCESS;
         }
         else
@@ -606,14 +625,14 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
             }
 
             // determine the required inference memory per token:
-            gptj_eval(gptj_ctx_v3, params.n_threads, 0, { 0, 1, 2, 3 }, logits, mem_per_token);
+            gptj_eval(gptj_ctx_v3, params.n_threads, 0, { 0, 1, 2, 3 }, logits, mem_per_token, use_scratch);
 
             //if the logits are NAN or duplicated, it means the model is incompatible
             std::vector<float> oldlogits(logits);
 
             //this is another hack because they change the library - we run the eval through the model
             //twice and compare logits. if they give the same logits for different inputs, model is broken
-            gptj_eval(gptj_ctx_v3, params.n_threads, 0, {4, 5, 6, 7}, logits, mem_per_token);
+            gptj_eval(gptj_ctx_v3, params.n_threads, 0, {4, 5, 6, 7}, logits, mem_per_token, use_scratch);
 
             if(logits.size()>0 && (IsNanCheck(logits[0]) || LogitsDuplicated(oldlogits,logits)))
             {
@@ -665,7 +684,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     {
         if(file_format==FileFormat::NEOX_6|| file_format==FileFormat::NEOX_7)
         {
-            ModelLoadResult res = gpt_neox_model_load(params.model, neox_ctx_v3, vocab, file_format);
+            ModelLoadResult res = gpt_neox_model_load(params.model, neox_ctx_v3, vocab, file_format, inputs.gpulayers);
             if(res==ModelLoadResult::FAIL)
             {
                 fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, params.model.c_str());
@@ -678,7 +697,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
             }
 
             // determine the required inference memory per token:
-            gpt_neox_eval(neox_ctx_v3, params.n_threads, 0, { 0, 1, 2, 3 }, logits, mem_per_token);
+            gpt_neox_eval(neox_ctx_v3, params.n_threads, 0, { 0, 1, 2, 3 }, logits, mem_per_token, use_scratch);
 
             return ModelLoadResult::SUCCESS;
         }
@@ -727,7 +746,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     }
     else if(file_format==FileFormat::MPT_1)
     {
-        bool res = mpt_model_load(params.model, mpt_ctx_v3, vocab);
+        bool res = mpt_model_load(params.model, mpt_ctx_v3, vocab, inputs.gpulayers);
         if(res==false)
         {
             fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, params.model.c_str());
@@ -735,7 +754,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         }
 
         // determine the required inference memory per token:
-        mpt_eval(mpt_ctx_v3, params.n_threads, 0, { 0, 1, 2, 3 }, logits, false, mem_per_token);
+        mpt_eval(mpt_ctx_v3, params.n_threads, 0, { 0, 1, 2, 3 }, logits, false, mem_per_token, use_scratch);
         return ModelLoadResult::SUCCESS;
     }
     else
@@ -748,6 +767,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
 
 bool gpttype_generate_abort()
 {
+    stopper_unused_tokens = remaining_tokens;
     remaining_tokens = 0;
     return true;
 }
@@ -797,7 +817,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
     {
         params.top_k = 120; //to disable top_k we actually need to increase this value to a very high number
     }
-    if (params.seed <= 0)
+    if (params.seed <= 0 || params.seed==0xFFFFFFFF)
     {
         params.seed = time(NULL);
     }
@@ -888,12 +908,13 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
     current_context_tokens.resize(n_past);
 
     remaining_tokens = params.n_predict;
-    int stopper_unused_tokens = 0;
+    stopper_unused_tokens = 0;
     int input_consumed = 0;
     std::mt19937 rng(params.seed);
     concat_output = "";
 
     bool startedsampling = false;
+    bool use_scratch = true; //for normal inference always use scratch
 
     timer_start();
     double time1 = 0, time2 = 0;
@@ -981,9 +1002,12 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
         printf("Bad format!");
     }
 
-    printf("\n");
+    if(debugmode!=-1)
+    {
+        printf("\n");
+    }
 
-    if (debugmode)
+    if (debugmode==1)
     {
         std::string outstr = "";
         printf("\n[Debug: Dump Input Tokens, format: %d]\n", file_format);
@@ -1013,7 +1037,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
         // predict
         unsigned int embdsize = embd.size();
         //print progress
-        if (!startedsampling)
+        if (!startedsampling && debugmode!=-1)
         {
             printf("\rProcessing Prompt%s (%d / %d tokens)", (blasmode ? " [BLAS]" : ""), input_consumed, embd_inp.size());
         }
@@ -1042,14 +1066,15 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                 }
                 else
                 {
-                    if(embd.size()>1)
-                    {
-                        evalres = rwkv_eval_sequence(rwkv_ctx_v3, (uint32_t*)embd.data(), embd.size(), rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, rwkv_ctx_v3->logits_out);
-                    }
-                    else
-                    {
-                        evalres = rwkv_eval(rwkv_ctx_v3, embd[0], rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, rwkv_ctx_v3->logits_out);
-                    }
+                    // if(embd.size()>1)
+                    // {
+                    //     evalres = rwkv_eval_sequence(rwkv_ctx_v3, (uint32_t*)embd.data(), embd.size(), rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, rwkv_ctx_v3->logits_out);
+                    // }
+                    // else
+                    // {
+                    bool ignoreLogits = (!startedsampling && ((int)embd_inp.size() > input_consumed + 2));
+                    evalres = rwkv_eval(rwkv_ctx_v3, embd[0], rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, ignoreLogits?nullptr:rwkv_ctx_v3->logits_out);
+                    //}
 
                     memcpy(logits.data(), rwkv_ctx_v3->logits_out, sizeof(float) * rwkv_vocab.size());
                     rwkv_ctx_v3->state_in = rwkv_ctx_v3->state_out;
@@ -1065,7 +1090,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
             }
             else if(file_format==FileFormat::GPT2_4)
             {
-                evalres = gpt2_eval(gpt2_ctx_v3, params.n_threads, n_past, embd, logits, mem_per_token, file_format);
+                evalres = gpt2_eval(gpt2_ctx_v3, params.n_threads, n_past, embd, logits, mem_per_token, use_scratch);
             }
             else if(file_format==FileFormat::NEOX_1 || file_format == FileFormat::NEOX_2 || file_format == FileFormat::NEOX_3 || file_format==FileFormat::NEOX_4 || file_format==FileFormat::NEOX_5)
             {
@@ -1073,7 +1098,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
             }
             else if(file_format==FileFormat::NEOX_6|| file_format==FileFormat::NEOX_7)
             {
-                evalres = gpt_neox_eval(neox_ctx_v3, params.n_threads, n_past, embd, logits, mem_per_token);
+                evalres = gpt_neox_eval(neox_ctx_v3, params.n_threads, n_past, embd, logits, mem_per_token, use_scratch);
             }
             else if(file_format==FileFormat::GPTJ_1 || file_format==FileFormat::GPTJ_2)
             {
@@ -1085,11 +1110,11 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
             }
             else if(file_format==FileFormat::GPTJ_5)
             {
-                evalres = gptj_eval(gptj_ctx_v3, params.n_threads, n_past, embd, logits, mem_per_token);
+                evalres = gptj_eval(gptj_ctx_v3, params.n_threads, n_past, embd, logits, mem_per_token, use_scratch);
             }
             else if(file_format==FileFormat::MPT_1)
             {
-                evalres = mpt_eval(mpt_ctx_v3, params.n_threads, n_past, embd, logits, false, mem_per_token);
+                evalres = mpt_eval(mpt_ctx_v3, params.n_threads, n_past, embd, logits, false, mem_per_token, use_scratch);
             }
             else
             {
@@ -1126,7 +1151,10 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                 params.n_threads = original_threads;
                 time1 = timer_check();
                 timer_start();
-                printf("\n");
+                if(debugmode!=-1)
+                {
+                    printf("\n");
+                }
             }
 
             unsigned int eosID = 0;
@@ -1172,6 +1200,16 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                         {
                             int topid = std::min_element(logits.begin(),logits.end())-logits.begin();
                             logits[eosID] = (logits[topid] < 0 ? logits[topid] : 0);
+                        }
+                        else
+                        {
+                            //special case, starcoder models use ID 0 for EOS
+                            if (file_format == FileFormat::GPT2_3 || file_format == FileFormat::GPT2_4)
+                            {
+                                eosID = 0;
+                                int topid = std::min_element(logits.begin(), logits.end()) - logits.begin();
+                                logits[eosID] = (logits[topid] < 0 ? logits[topid] : 0);
+                            }
                         }
                     }
 
@@ -1219,11 +1257,11 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                 concat_output += tokenizedstr;
             }
 
-            if (startedsampling)
+            if (startedsampling && debugmode!=-1)
             {
                 printf("\rGenerating (%d / %d tokens)", (params.n_predict - remaining_tokens), params.n_predict);
             }
-            if(debugmode && top_picks.size()>0)
+            if(debugmode==1 && top_picks.size()>0)
             {
                 printf(" [");
                 bool firstloop = true;
@@ -1243,6 +1281,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
 
             if(unbanTokens && id==eosID)
             {
+                stopper_unused_tokens = remaining_tokens;
                 printf("\n(EOS token triggered!)");
                 remaining_tokens = 0;
             }
@@ -1253,7 +1292,10 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                 {
                     stopper_unused_tokens = remaining_tokens;
                     remaining_tokens = 0;
-                    printf("\n(Stop sequence triggered: <%s>)", matched.c_str());
+                    if(debugmode!=-1)
+                    {
+                        printf("\n(Stop sequence triggered: <%s>)", matched.c_str());
+                    }
                     break;
                 }
             }
@@ -1280,7 +1322,8 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
     float pt1 = (time1*1000.0/(embd_inp.size()==0?1:embd_inp.size()));
     int realnpredict = params.n_predict-stopper_unused_tokens;
     float pt2 = (time2*1000.0/(realnpredict==0?1:realnpredict));
-    printf("\nTime Taken - Processing:%.1fs (%.0fms/T), Generation:%.1fs (%.0fms/T), Total:%.1fs", time1, pt1, time2, pt2, (time1 + time2));
+    float tokens_per_second = (realnpredict == 0 ? 0 : realnpredict / (time1 + time2));
+    printf("\nTime Taken - Processing:%.1fs (%.0fms/T), Generation:%.1fs (%.0fms/T), Total:%.1fs (%.1fT/s)", time1, pt1, time2, pt2, (time1 + time2), tokens_per_second);
     fflush(stdout);
     output.status = 1;
     generation_finished = true;

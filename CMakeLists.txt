@@ -1,5 +1,5 @@
-# DO NOT USE THIS FILE. 
-# IT'S ONLY FOR CUBLAS BUILD PURPOSES ON WINDOWS VISUAL STUDIO. 
+# DO NOT USE THIS FILE.
+# IT'S ONLY FOR CUBLAS BUILD PURPOSES ON WINDOWS VISUAL STUDIO.
 # IT WILL NOT BE UPDATED OR MAINTAINED !!!
 
 message(STATUS "============== ============== ==============")
@@ -41,8 +41,12 @@ if (NOT MSVC)
 endif()
 
 # 3rd party libs
-option(LLAMA_CUBLAS                 "llama: use cuBLAS"                                     ON)
-
+option(LLAMA_CUBLAS                          "llama: use cuBLAS"                                ON)
+set(LLAMA_CUDA_DMMV_X      "32" CACHE STRING "llama: x stride for dmmv CUDA kernels")
+set(LLAMA_CUDA_DMMV_Y       "1" CACHE STRING "llama: y block size for dmmv CUDA kernels")
+option(LLAMA_CUDA_DMMV_F16                   "llama: use 16 bit floats for dmmv CUDA kernels"   OFF)
+set(LLAMA_CUDA_KQUANTS_ITER "2" CACHE STRING "llama: iters./thread per block for Q2_K/Q6_K")
+option(LLAMA_K_QUANTS                        "llama: use k-quants"                              ON)
 
 
 #
@@ -69,8 +73,15 @@ if (LLAMA_CUBLAS)
 
         set(GGML_CUDA_SOURCES ggml-cuda.cu ggml-cuda.h)
         set(GGML_V2_CUDA_SOURCES otherarch/ggml_v2-cuda.cu otherarch/ggml_v2-cuda.h)
+        set(GGML_V2_LEGACY_CUDA_SOURCES otherarch/ggml_v2-cuda-legacy.cu otherarch/ggml_v2-cuda-legacy.h)
 
         add_compile_definitions(GGML_USE_CUBLAS)
+        add_compile_definitions(GGML_CUDA_DMMV_X=${LLAMA_CUDA_DMMV_X})
+        add_compile_definitions(GGML_CUDA_DMMV_Y=${LLAMA_CUDA_DMMV_Y})
+        if (LLAMA_CUDA_DMMV_F16)
+            add_compile_definitions(GGML_CUDA_DMMV_F16)
+        endif()
+        add_compile_definitions(K_QUANTS_PER_ITERATION=${LLAMA_CUDA_KQUANTS_ITER})
 
         if (LLAMA_STATIC)
             set(LLAMA_EXTRA_LIBS ${LLAMA_EXTRA_LIBS} CUDA::cudart_static CUDA::cublas_static CUDA::cublasLt_static)
@@ -82,8 +93,6 @@ if (LLAMA_CUBLAS)
         message(WARNING "cuBLAS not found")
     endif()
 endif()
-
-
 
 if (LLAMA_ALL_WARNINGS)
     if (NOT MSVC)
@@ -158,11 +167,6 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm" OR ${CMAKE_SYSTEM_PROCESSOR} MATCHES
     if (MSVC)
         # TODO: arm msvc?
     else()
-        if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
-            # Apple M1, M2, etc.
-            # Raspberry Pi 3, 4, Zero 2 (64-bit)
-            add_compile_options(-mcpu=native)
-        endif()
         if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "armv6")
             # Raspberry Pi 1, Zero
             add_compile_options(-mfpu=neon-fp-armv8 -mfp16-format=ieee -mno-unaligned-access)
@@ -259,7 +263,8 @@ set_target_properties(ggml_v1 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(ggml_v2 OBJECT
             otherarch/ggml_v2.c
             otherarch/ggml_v2.h
-            ${GGML_V2_CUDA_SOURCES})
+            ${GGML_V2_CUDA_SOURCES}
+            ${GGML_V2_LEGACY_CUDA_SOURCES})
 target_include_directories(ggml_v2 PUBLIC . ./otherarch ./otherarch/tools)
 target_compile_features(ggml_v2 PUBLIC c_std_11) # don't bump
 target_link_libraries(ggml_v2 PUBLIC Threads::Threads ${LLAMA_EXTRA_LIBS})
@@ -273,7 +278,7 @@ target_compile_features(common2 PUBLIC cxx_std_11) # don't bump
 target_link_libraries(common2 PRIVATE ggml ${LLAMA_EXTRA_LIBS})
 set_target_properties(common2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(gpttype_adapter 
+add_library(gpttype_adapter
             gpttype_adapter.cpp)
 target_include_directories(gpttype_adapter PUBLIC . ./otherarch ./otherarch/tools ./examples)
 target_compile_features(gpttype_adapter PUBLIC cxx_std_11) # don't bump
@@ -287,13 +292,12 @@ if (GGML_CUDA_SOURCES)
     set_property(TARGET ggml PROPERTY CUDA_SELECT_NVCC_ARCH_FLAGS "Auto")
 endif()
 
-set(TARGET koboldcpp)
+set(TARGET koboldcpp_cublas)
 add_library(${TARGET} SHARED expose.cpp expose.h)
 target_include_directories(${TARGET} PUBLIC . ./otherarch ./otherarch/tools ./examples)
 target_compile_features(${TARGET} PUBLIC cxx_std_11) # don't bump
 set_target_properties(${TARGET} PROPERTIES PREFIX "")
-set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME "koboldcpp")
+set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME "koboldcpp_cublas")
 set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(${TARGET} PUBLIC ggml ggml_v1 ggml_v2 common2 gpttype_adapter ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_11)
-
