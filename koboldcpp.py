@@ -240,8 +240,6 @@ modelbusy = False
 defaultport = 5001
 KcppVersion = "1.34"
 showdebug = True
-use_chromadb = False
-extension = None
 extensions = []
 
 class ServerRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -356,7 +354,6 @@ class ServerRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         if stream_flag:
             tasks.append(self.handle_sse_stream())
-        global extension
         for extension in extensions:
             newprompt = extension.inference(newprompt, genparams, genparams.get('max_context_length', maxctx))
         generate_task = asyncio.create_task(self.generate_text(newprompt, genparams, basic_api_flag, stream_flag))
