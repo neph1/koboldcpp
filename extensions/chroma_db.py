@@ -61,6 +61,4 @@ class chroma_db(ExtensionInterface):
         trimmed_results = (trimmed_results[:result_max_tokens]) if len(trimmed_results) > result_max_tokens else trimmed_results
         max_new_prompt = max_context-result_max_tokens
         newprompt = (newprompt[-(max_new_prompt):]) if len(newprompt) > max_new_prompt else newprompt
-        newprompt = f'Topic:[{trimmed_results}] {newprompt}'
-        print(f' numbers: newprompt:{len(newprompt)} max search:{result_max_tokens} ')
-        return newprompt
+        return f'Topic:[{trimmed_results}] {newprompt}'
