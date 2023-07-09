@@ -4,7 +4,7 @@ import time
 class date_and_time(ExtensionInterface):
     
     def inference(self, newprompt, genparams, max_context, *args):
-        responses = newprompt.split('###Response')
+        responses = newprompt.split('### Response:')
         if not responses:
             return newprompt
         response = responses[-1]
