@@ -1168,9 +1168,9 @@ def show_old_gui():
 
 def load_extension(extension_name : str):
     global extensions
-    module = importlib.import_module(f'extensions.{extension_name}')
+    module = importlib.import_module(f'extensions.{extension_name}.{extension_name}')
     extensions.append(getattr(module, extension_name)())
-    print(f'initializing {extension}' )
+    print(f'initializing {extension_name}' )
 
 def main(args):
 

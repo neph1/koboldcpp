@@ -1,0 +1,4 @@
+CACHE_PATH: "/media/rickard/Development/models/clip/"
+DEFAULT_MODEL: "ViT-L-14/openai"
+IMAGES_PATH: "./images"
+CLIP_MODE: "fast"
