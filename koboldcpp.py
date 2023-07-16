@@ -38,6 +38,7 @@ class load_model_inputs(ctypes.Structure):
                 ("debugmode", ctypes.c_int),
                 ("forceversion", ctypes.c_int),
                 ("gpulayers", ctypes.c_int),
+                ("linear_rope", ctypes.c_bool),
                 ("banned_tokens", ctypes.c_char_p * ban_token_max)]
 
 class generation_inputs(ctypes.Structure):
@@ -162,6 +163,8 @@ def init_library():
     handle.new_token.argtypes = [ctypes.c_int]
     handle.get_stream_count.restype = ctypes.c_int
     handle.has_finished.restype = ctypes.c_bool
+    handle.get_last_eval_time.restype = ctypes.c_float
+    handle.get_last_process_time.restype = ctypes.c_float
     handle.abort_generate.restype = ctypes.c_bool
     handle.get_pending_output.restype = ctypes.c_char_p
 
@@ -188,6 +191,7 @@ def load_model(model_filename):
     inputs.blasbatchsize = args.blasbatchsize
     inputs.forceversion = args.forceversion
     inputs.gpulayers = args.gpulayers
+    inputs.linear_rope = args.linearrope
     clblastids = 0
     if args.useclblast:
         clblastids = 100 + int(args.useclblast[0])*10 + int(args.useclblast[1])
@@ -240,6 +244,8 @@ def generate(prompt,max_length=20, max_context_length=512, temperature=0.8, top_
             for i, sampler in enumerate(sampler_order):
                 inputs.sampler_order[i] = sampler
             inputs.sampler_len = len(sampler_order)
+            if inputs.sampler_len>0 and (inputs.sampler_order[0]!=6 or inputs.sampler_order[inputs.sampler_len-1]!=5):
+                print("\n(Warning!!! Poor sampler_order detected! You will have reduced quality. Recommended values are [6,0,1,3,4,2,5])")
         except TypeError as e:
             print("ERROR: sampler_order must be a list of integers: " + str(e))
     inputs.seed = seed
@@ -271,7 +277,7 @@ maxhordectx = 1024
 maxhordelen = 256
 modelbusy = False
 defaultport = 5001
-KcppVersion = "1.34.2"
+KcppVersion = "1.35"
 showdebug = True
 extensions = []
 
@@ -452,6 +458,11 @@ class ServerRequestHandler(http.server.SimpleHTTPRequestHandler):
         elif self.path.endswith(('/api/extra/version')):
             response_body = (json.dumps({"result":"KoboldCpp","version":KcppVersion}).encode())
 
+        elif self.path.endswith(('/api/extra/perf')):
+            lastp = handle.get_last_process_time()
+            laste = handle.get_last_eval_time()
+            response_body = (json.dumps({"last_process":lastp,"last_eval":laste}).encode())
+
         if response_body is None:
             self.send_response(404)
             self.end_headers()
@@ -529,7 +540,6 @@ class ServerRequestHandler(http.server.SimpleHTTPRequestHandler):
             newprompt = fullprompt
 
             gen = asyncio.run(self.handle_request(genparams, newprompt, basic_api_flag, kai_sse_stream_flag))
-
             try:
                 self.send_response(200)
                 self.end_headers()
@@ -609,14 +619,13 @@ def RunServerMultiThreaded(addr, port, embedded_kailite = None):
 
 # note: customtkinter-5.2.0
 def show_new_gui():
-    import customtkinter as ctk
     from tkinter.filedialog import askopenfilename
     from tkinter.filedialog import asksaveasfile
 
     # if args received, launch
     if len(sys.argv) != 1:
-        root = ctk.CTk()
-         #we dont want the useless window to be visible, but we want it in taskbar
+        import tkinter as tk
+        root = tk.Tk() #we dont want the useless window to be visible, but we want it in taskbar
         root.attributes("-alpha", 0)
         args.model_param = askopenfilename(title="Select ggml model .bin files")
         root.destroy()
@@ -625,6 +634,8 @@ def show_new_gui():
             time.sleep(2)
             sys.exit(2)
         return
+
+    import customtkinter as ctk
 
     nextstate = 0 #0=exit, 1=launch, 2=oldgui
     windowwidth = 520
@@ -767,21 +778,27 @@ def show_new_gui():
     quick_gpu_layers_entry,quick_gpu_layers_label = makelabelentry(quick_tab,"GPU Layers:", gpulayers_var, 4, 50)
     quick_gpu_selector_label = makelabel(quick_tab, "GPU ID:", 3)
     quick_gpu_selector_box = ctk.CTkComboBox(quick_tab, values=["1","2","3"], width=60, variable=gpu_choice_var, state="readonly")
+    CUDA_quick_gpu_selector_box = ctk.CTkComboBox(quick_tab, values=["1","2","3","All"], width=60, variable=gpu_choice_var, state="readonly")
     quick_lowvram_box = makecheckbox(quick_tab,  "Low VRAM", lowvram_var, 5)
 
-    # hides gpu options when CLBlast is not chosen
     def changerunmode(a,b,c):
         index = runopts_var.get()
         if index == "Use CLBlast" or index == "Use CuBLAS":
             gpu_selector_label.grid(row=3, column=0, padx = 8, pady=1, stick="nw")
-            gpu_selector_box.grid(row=3, column=1, padx=8, pady=1, stick="nw")
             quick_gpu_selector_label.grid(row=3, column=0, padx = 8, pady=1, stick="nw")
-            quick_gpu_selector_box.grid(row=3, column=1, padx=8, pady=1, stick="nw")
+            if index == "Use CLBlast":
+                gpu_selector_box.grid(row=3, column=1, padx=8, pady=1, stick="nw")
+                quick_gpu_selector_box.grid(row=3, column=1, padx=8, pady=1, stick="nw")
+            elif index == "Use CuBLAS":
+                CUDA_gpu_selector_box.grid(row=3, column=1, padx=8, pady=1, stick="nw")
+                CUDA_quick_gpu_selector_box.grid(row=3, column=1, padx=8, pady=1, stick="nw")
         else:
             gpu_selector_label.grid_forget()
             gpu_selector_box.grid_forget()
+            CUDA_gpu_selector_box.grid_forget()
             quick_gpu_selector_label.grid_forget()
             quick_gpu_selector_box.grid_forget()
+            CUDA_quick_gpu_selector_box.grid_forget()
 
         if index == "Use CuBLAS":
             lowvram_box.grid(row=4, column=0, padx=8, pady=1,  stick="nw")
@@ -832,6 +849,7 @@ def show_new_gui():
     gpu_layers_entry,gpu_layers_label = makelabelentry(hardware_tab,"GPU Layers:", gpulayers_var, 4, 50)
     gpu_selector_label = makelabel(hardware_tab, "GPU ID:", 3)
     gpu_selector_box = ctk.CTkComboBox(hardware_tab, values=["1","2","3"], width=60, variable=gpu_choice_var, state="readonly")
+    CUDA_gpu_selector_box = ctk.CTkComboBox(hardware_tab, values=["1","2","3", "All"], width=60, variable=gpu_choice_var, state="readonly")
     lowvram_box = makecheckbox(hardware_tab,  "Low VRAM", lowvram_var, 5)
 
     # presets selector
@@ -932,24 +950,7 @@ def show_new_gui():
         root.destroy()
         pass
 
-    ctk.CTkButton(tabs , text = "Launch", fg_color="#2f8d3c", command = guilaunch, width=80, height = 35 ).grid(row=1,column=1, stick="se", padx= 25, pady=5)
-
-    # ctk.CTkButton(tabs , text = "Save", fg_color="#084a66", command = save_config, width=60, height = 35 ).grid(row=1,column=1, stick="sw", padx= 5, pady=5)
-    # ctk.CTkButton(tabs , text = "Load", fg_color="#084a66", command = load_config, width=60, height = 35 ).grid(row=1,column=1, stick="sw", padx= 70, pady=5)
-
-    ctk.CTkButton(tabs , text = "Old GUI", fg_color="#084a66", command = switch_old_gui, width=100, height = 35 ).grid(row=1,column=0, stick="sw", padx= 5, pady=5)
-    # runs main loop until closed or launch clicked
-    root.mainloop()
-
-    if nextstate==0:
-        print("Exiting by user request.")
-        time.sleep(2)
-        sys.exit()
-    elif nextstate==2:
-        time.sleep(0.1)
-        show_old_gui()
-    else:
-        # processing vars
+    def export_vars():
         args.threads = int(threads_var.get())
 
         args.usemlock   = usemlock.get() == 1
@@ -962,11 +963,16 @@ def show_new_gui():
         args.smartcontext = smartcontext.get()==1
         args.unbantokens = unbantokens.get()==1
 
-        gpuchoiceidx = int(gpu_choice_var.get())-1
+        gpuchoiceidx = 0
+        if gpu_choice_var.get()!="All":
+            gpuchoiceidx = int(gpu_choice_var.get())-1
         if runopts_var.get() == runopts[1]:
             args.useclblast = [[0,0], [1,0], [0,1]][gpuchoiceidx]
         if runopts_var.get() == runopts[2]:
-            args.usecublas = ["lowvram",str(gpuchoiceidx)] if lowvram_var.get() == 1 else ["normal",str(gpuchoiceidx)]
+            if gpu_choice_var.get()=="All":
+                args.usecublas = ["lowvram"] if lowvram_var.get() == 1 else ["normal"]
+            else:
+                args.usecublas = ["lowvram",str(gpuchoiceidx)] if lowvram_var.get() == 1 else ["normal",str(gpuchoiceidx)]
         if gpulayers_var.get():
             args.gpulayers = int(gpulayers_var.get())
         if runopts_var.get()==runopts[3]:
@@ -977,9 +983,6 @@ def show_new_gui():
             args.noavx2 = True
             args.noblas = True
             args.nommap = True
-            print("[Failsafe Mode : mmap is disabled.]")
-
-
 
         args.blasthreads = None if blas_threads_var.get()=="" else int(blas_threads_var.get())
 
@@ -996,6 +999,120 @@ def show_new_gui():
         args.host = host_var.get()
 
         args.hordeconfig = None if usehorde_var.get() == 0 else [horde_name_var.get(), horde_gen_var.get(), horde_context_var.get()]
+
+    def import_vars(dict):
+        threads_var.set(dict["threads"])
+        usemlock.set(1 if dict["usemlock"] else 0)
+        debugmode.set(1 if dict["debugmode"] else 0)
+        launchbrowser.set(1 if dict["launch"] else 0)
+        highpriority.set(1 if dict["highpriority"] else 0)
+        disablemmap.set(1 if dict["nommap"] else 0)
+        psutil.set(1 if dict["psutil_set_threads"] else 0)
+        stream.set(1 if dict["stream"] else 0)
+        smartcontext.set(1 if dict["smartcontext"] else 0)
+        unbantokens.set(1 if dict["unbantokens"] else 0)
+        runopts_var.set(runopts[0])
+        if dict["useclblast"]:
+            runopts_var.set(runopts[1])
+            gpu_choice_var.set(str(["0 0", "1 0", "0 1"].index(str(dict["useclblast"][0]) + " " + str(dict["useclblast"][1])) + 1))
+        elif dict["usecublas"]:
+            runopts_var.set(runopts[2])
+            if len(dict["usecublas"])==1:
+                lowvram_var.set(1 if dict["usecublas"][0]=="lowvram" else 0)
+            else:
+                lowvram_var.set(1 if "lowvram" in dict["usecublas"] else 0)
+                gpu_choice_var.set("1")
+                for g in range(3):
+                    if str(g) in dict["usecublas"]:
+                        gpu_choice_var.set(str(g+1))
+                        break
+        if dict["gpulayers"]:
+            gpulayers_var.set(dict["gpulayers"])
+
+        if dict["noblas"] and dict["noavx2"]:
+            runopts_var.set(runopts[5])
+        elif dict["noavx2"]:
+            runopts_var.set(runopts[5])
+        elif dict["noblas"]:
+            runopts_var.set(runopts[3])
+        if dict["blasthreads"]:
+            blas_threads_var.set(str(dict["blasthreads"]))
+        else:
+            blas_threads_var.set("")
+
+        if dict["contextsize"]:
+            context_var.set(contextsize_text.index(str(dict["contextsize"])))
+        if dict["blasbatchsize"]:
+            blas_size_var.set(blasbatchsize_values.index(str(dict["blasbatchsize"])))
+        if dict["forceversion"]:
+            version_var.set(str(dict["forceversion"]))
+
+        if dict["mirostat"] and len(dict["mirostat"])>1:
+            usemirostat.set(0 if str(dict["mirostat"][0])=="0" else 1)
+            mirostat_var.set(str(dict["mirostat"][0]))
+            mirostat_tau.set(str(dict["mirostat"][1]))
+            mirostat_eta.set(str(dict["mirostat"][2]))
+
+        if dict["model_param"]:
+            model_var.set(dict["model_param"])
+
+        if dict["lora"]:
+            if len(dict["lora"]) > 1:
+                lora_var.set(dict["lora"][0])
+                lora_base_var.set(dict["lora"][1])
+            else:
+                lora_var.set(dict["lora"][0])
+
+        if dict["port_param"]:
+            port_var.set(dict["port_param"])
+
+        if dict["host"]:
+            host_var.set(dict["host"])
+
+        if dict["hordeconfig"] and len(dict["hordeconfig"]) > 1:
+            horde_name_var.set(dict["hordeconfig"][0])
+            horde_gen_var.set(dict["hordeconfig"][1])
+            horde_context_var.set(dict["hordeconfig"][2])
+
+    def save_config():
+        file_type = [("KoboldCpp Settings", "*.kcpps")]
+        filename = asksaveasfile(filetypes=file_type, defaultextension=file_type)
+        if filename == None: return
+        export_vars()
+        file = open(str(filename.name), 'a')
+        file.write(json.dumps(args.__dict__))
+        file.close()
+        pass
+
+    def load_config():
+        file_type = [("KoboldCpp Settings", "*.kcpps")]
+        filename = askopenfilename(filetypes=file_type, defaultextension=file_type)
+        if not filename or filename=="":
+            return
+        with open(filename, 'r') as f:
+            dict = json.load(f)
+            import_vars(dict)
+        pass
+
+    ctk.CTkButton(tabs , text = "Launch", fg_color="#2f8d3c", command = guilaunch, width=80, height = 35 ).grid(row=1,column=1, stick="se", padx= 25, pady=5)
+
+    ctk.CTkButton(tabs , text = "Save", fg_color="#084a66", command = save_config, width=60, height = 35 ).grid(row=1,column=1, stick="sw", padx= 5, pady=5)
+    ctk.CTkButton(tabs , text = "Load", fg_color="#084a66", command = load_config, width=60, height = 35 ).grid(row=1,column=1, stick="sw", padx= 70, pady=5)
+
+    ctk.CTkButton(tabs , text = "Old GUI", fg_color="#084a66", command = switch_old_gui, width=100, height = 35 ).grid(row=1,column=0, stick="sw", padx= 5, pady=5)
+    # runs main loop until closed or launch clicked
+    root.mainloop()
+
+    if nextstate==0:
+        print("Exiting by user request.")
+        time.sleep(2)
+        sys.exit()
+    elif nextstate==2:
+        time.sleep(0.1)
+        show_old_gui()
+    else:
+        # processing vars
+        export_vars()
 
         if not args.model_param:
             print("\nNo ggml model file was selected. Exiting.")
@@ -1328,6 +1445,7 @@ if __name__ == '__main__':
     parser.add_argument("--highpriority", help="Experimental flag. If set, increases the process CPU priority, potentially speeding up generation. Use caution.", action='store_true')
     parser.add_argument("--contextsize", help="Controls the memory allocated for maximum context size, only change if you need more RAM for big contexts. (default 2048)", type=int,choices=[512,1024,2048,3072,4096,6144,8192], default=2048)
     parser.add_argument("--blasbatchsize", help="Sets the batch size used in BLAS processing (default 512). Setting it to -1 disables BLAS mode, but keeps other benefits like GPU offload.", type=int,choices=[-1,32,64,128,256,512,1024], default=512)
+    parser.add_argument("--linearrope", help="If set, uses linear RoPE scaling. Otherwise, uses NTK-Aware scaling.", action='store_true')
     parser.add_argument("--stream", help="Uses streaming when generating tokens. Only for the Kobold Lite UI.", action='store_true')
     parser.add_argument("--smartcontext", help="Reserving a portion of context to try processing less frequently.", action='store_true')
     parser.add_argument("--unbantokens", help="Normally, KoboldAI prevents the EOS token from being generated. This flag unbans it.", action='store_true')
@@ -1343,7 +1461,7 @@ if __name__ == '__main__':
     compatgroup = parser.add_mutually_exclusive_group()
     compatgroup.add_argument("--noblas", help="Do not use OpenBLAS for accelerated prompt ingestion", action='store_true')
     compatgroup.add_argument("--useclblast", help="Use CLBlast for GPU Acceleration. Must specify exactly 2 arguments, platform ID and device ID (e.g. --useclblast 1 0).", type=int, choices=range(0,9), nargs=2)
-    compatgroup.add_argument("--usecublas", help="Use CuBLAS for GPU Acceleration. Requires Nvidia GPU. Select lowvram to not allocate VRAM scratch buffer. Enter a number after to select a different main GPU.", nargs='*',metavar=('[lowvram|normal] [main GPU ID]'), choices=['normal', 'lowvram', '0', '1', '2'])
+    compatgroup.add_argument("--usecublas", help="Use CuBLAS for GPU Acceleration. Requires CUDA. Select lowvram to not allocate VRAM scratch buffer. Enter a number afterwards to select and use 1 GPU. Leaving no number will use all GPUs.", nargs='*',metavar=('[lowvram|normal] [main GPU ID]'), choices=['normal', 'lowvram', '0', '1', '2'])
     parser.add_argument("--gpulayers", help="Set number of layers to offload to GPU when using GPU. Requires GPU.",metavar=('[GPU layers]'), type=int, default=0)
     parser.add_argument("--extensions", help="Load extensions, space separated")
     args = parser.parse_args()

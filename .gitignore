@@ -20,6 +20,7 @@ build-static/
 build-cublas/
 build-opencl/
 build-metal/
+build-mpi/
 build-no-accel/
 build-sanitize-addr/
 build-sanitize-thread/
@@ -68,3 +69,5 @@ koboldcpp_openblas.dll
 koboldcpp_openblas_noavx2.dll
 koboldcpp_clblast.dll
 koboldcpp_cublas.dll
+cublas64_11.dll
+cublasLt64_11.dll

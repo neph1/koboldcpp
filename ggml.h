@@ -65,7 +65,7 @@
 //       ggml_set_f32(a, 3.0f);
 //       ggml_set_f32(b, 4.0f);
 //
-//       ggml_graph_compute(ctx0, &gf);
+//       ggml_graph_compute_with_ctx(ctx, &gf, n_threads);
 //
 //       printf("f = %f\n", ggml_get_f32_1d(f, 0));
 //
@@ -132,10 +132,10 @@
 //   {
 //       struct ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2, 3);
 //
-//       // a[1, 2] = 1.0f;
+//       // a[2, 1] = 1.0f;
 //       *(float *) ((char *) a->data + 2*a->nb[1] + 1*a->nb[0]) = 1.0f;
 //
-//       // a[2, 0] = 2.0f;
+//       // a[0, 2] = 2.0f;
 //       *(float *) ((char *) a->data + 0*a->nb[1] + 2*a->nb[0]) = 2.0f;
 //
 //       ...
@@ -197,11 +197,17 @@
 #define GGML_MAX_NODES         4096
 #define GGML_MAX_PARAMS        256
 #define GGML_MAX_CONTEXTS      64
-#define GGML_MAX_OPT           4
+#define GGML_MAX_SRC           6
 #define GGML_MAX_NAME          48
 #define GGML_DEFAULT_N_THREADS 4
 
 #define GGML_UNUSED(x) (void)(x)
+
+// Maximum training context of the model in use
+// For the LLaMA models this is normally 2048, but somehow "stepping out" by 128 gives better results (tested at 7B and 13B)
+#ifndef GGML_TRAINING_CTX
+#define GGML_TRAINING_CTX 2048
+#endif
 
 #define GGML_ASSERT(x) \
     do { \
@@ -414,12 +420,7 @@ extern "C" {
         bool is_param;
 
         struct ggml_tensor * grad;
-        struct ggml_tensor * src0;
-        struct ggml_tensor * src1;
-        struct ggml_tensor * opt[GGML_MAX_OPT];
-
-        // thread scheduling
-        int n_tasks;
+        struct ggml_tensor * src[GGML_MAX_SRC];
 
         // performance
         int     perf_runs;
@@ -432,19 +433,27 @@ extern "C" {
 
         void * extra; // extra things e.g. for ggml-cuda.cu
 
-        char padding[4];
+        char padding[8];
     };
 
     static const size_t GGML_TENSOR_SIZE = sizeof(struct ggml_tensor);
+
+    // the compute plan that needs to be prepared for ggml_graph_compute()
+    // since https://github.com/ggerganov/ggml/issues/287
+    struct ggml_cplan {
+        size_t    work_size; // size of work buffer, calculated by `ggml_graph_plan()`
+        uint8_t * work_data; // work buffer, to be allocated by caller before calling to `ggml_graph_compute()`
+
+        int n_threads;
+
+        // the `n_tasks` of nodes, 1:1 mapping to cgraph nodes
+        int n_tasks[GGML_MAX_NODES];
+    };
 
     // computation graph
     struct ggml_cgraph {
         int n_nodes;
         int n_leafs;
-        int n_threads;
-
-        size_t work_size;
-        struct ggml_tensor * work;
 
         struct ggml_tensor * nodes[GGML_MAX_NODES];
         struct ggml_tensor * grads[GGML_MAX_NODES];
@@ -532,6 +541,8 @@ extern "C" {
     // use this to compute the memory overhead of a tensor
     GGML_API size_t ggml_tensor_overhead(void);
 
+    GGML_API void set_ntk_rope_scale_mode(bool useNtk);
+    GGML_API bool get_ntk_rope_scale_mode();
     GGML_API float get_theta_scale(int n_dims,int n_past,int n_ctx);
 
     // main
@@ -1292,15 +1303,22 @@ extern "C" {
 
     GGML_API void ggml_set_param(
             struct ggml_context * ctx,
-            struct ggml_tensor * tensor);
+            struct ggml_tensor  * tensor);
 
     GGML_API void ggml_build_forward_expand(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor);
 
     GGML_API struct ggml_cgraph ggml_build_forward (struct ggml_tensor * tensor);
     GGML_API struct ggml_cgraph ggml_build_backward(struct ggml_context * ctx, struct ggml_cgraph * gf, bool keep);
 
-    GGML_API void ggml_graph_compute(struct ggml_context * ctx, struct ggml_cgraph * cgraph);
-    GGML_API void ggml_graph_reset  (struct ggml_cgraph * cgraph);
+    // ggml_graph_plan() has to be called before ggml_graph_compute()
+    // when plan.work_size > 0, caller must allocate memory for plan.work_data
+    GGML_API struct ggml_cplan ggml_graph_plan   (struct ggml_cgraph * cgraph, int n_threads /*= GGML_DEFAULT_N_THREADS*/);
+    GGML_API              void ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cplan * cplan);
+    GGML_API              void ggml_graph_reset  (struct ggml_cgraph * cgraph);
+
+    // same as ggml_graph_compute() but the work data is allocated as a part of the context
+    // note: the drawback of this API is that you must have ensured that the context has enough memory for the work data
+    GGML_API void ggml_graph_compute_with_ctx(struct ggml_context * ctx, struct ggml_cgraph * cgraph, int n_threads);
 
     GGML_API struct ggml_tensor * ggml_graph_get_tensor(struct ggml_cgraph * cgraph, const char * name);
 

@@ -33,6 +33,8 @@ std::string executable_path = "";
 std::string lora_filename = "";
 std::string lora_base = "";
 bool generation_finished;
+float last_process_time = 0;
+float last_eval_time = 0;
 std::vector<std::string> generated_tokens;
 
 //return val: 0=fail, 1=(original ggml, alpaca), 2=(ggmf), 3=(ggjt)
@@ -346,6 +348,13 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     = gpt2_ctx_v1.hparams.n_ctx = gpt2_ctx_v2.hparams.n_ctx = gpt2_ctx_v3.hparams.n_ctx
     = mpt_ctx_v3.hparams.n_ctx = params.n_ctx;
 
+    //handle linear rope
+    if(inputs.linear_rope)
+    {
+        printf("Using Linear RoPE scaling instead of NTK-Aware scaling.\n");
+    }
+    set_ntk_rope_scale_mode(!inputs.linear_rope);
+
     //handle custom token bans
     banned_tokens.clear();
     for(int x=0;x<ban_token_max;++x)
@@ -563,7 +572,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
             rwkv_ctx_v3->logits_out = (float *)malloc(logitbufsiz);
             rwkv_ctx_v3->state_in = nullptr;
 
-            bool testeval = rwkv_eval(rwkv_ctx_v3, 0, rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, rwkv_ctx_v3->logits_out);
+            bool testeval = rwkv_eval(rwkv_ctx_v3, params.n_threads, 0, rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, rwkv_ctx_v3->logits_out);
             if (!testeval)
             {
                 printf("\nError: RWKV Init Eval Failed!\n");
@@ -832,6 +841,7 @@ const std::string & gpttype_get_pending_output()
 
 generation_outputs gpttype_generate(const generation_inputs inputs, generation_outputs &output)
 {
+    concat_output = "";
     stop_sequence.clear();
     for(int x=0;x<stop_token_max;++x)
     {
@@ -964,7 +974,6 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
     stopper_unused_tokens = 0;
     int input_consumed = 0;
     std::mt19937 rng(params.seed);
-    concat_output = "";
 
     //prepare sampler order
     std::vector<samplers> sampler_order;
@@ -1162,12 +1171,12 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                 {
                     if(embd.size()>1)
                     {
-                        evalres = rwkv_eval_sequence(rwkv_ctx_v3, (uint32_t*)embd.data(), embd.size(), rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, rwkv_ctx_v3->logits_out);
+                        evalres = rwkv_eval_sequence(rwkv_ctx_v3, params.n_threads, (uint32_t*)embd.data(), embd.size(), rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, rwkv_ctx_v3->logits_out);
                     }
                     else
                     {
                     bool ignoreLogits = (!startedsampling && ((int)embd_inp.size() > input_consumed + 2));
-                    evalres = rwkv_eval(rwkv_ctx_v3, embd[0], rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, ignoreLogits?nullptr:rwkv_ctx_v3->logits_out);
+                    evalres = rwkv_eval(rwkv_ctx_v3, params.n_threads, embd[0], rwkv_ctx_v3->state_in, rwkv_ctx_v3->state_out, ignoreLogits?nullptr:rwkv_ctx_v3->logits_out);
                     }
 
                     memcpy(logits.data(), rwkv_ctx_v3->logits_out, sizeof(float) * rwkv_vocab.size());
@@ -1438,6 +1447,8 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
     fflush(stdout);
     output.status = 1;
     generation_finished = true;
+    last_eval_time = pt2;
+    last_process_time = pt1;
     snprintf(output.text, sizeof(output.text), "%s", concat_output.c_str());
 
     return output;

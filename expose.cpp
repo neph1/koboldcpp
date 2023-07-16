@@ -220,6 +220,14 @@ extern "C"
         return generation_finished;
     }
 
+    float get_last_eval_time() {
+        return last_eval_time;
+    }
+
+    float get_last_process_time() {
+        return last_process_time;
+    }
+
     const char* get_pending_output() {
        return gpttype_get_pending_output().c_str();
     }

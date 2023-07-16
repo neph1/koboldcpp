@@ -36,6 +36,7 @@ struct load_model_inputs
     const int debugmode = 0;
     const int forceversion = 0;
     const int gpulayers = 0;
+    const bool linear_rope;
     const char * banned_tokens[ban_token_max];
 };
 struct generation_inputs
@@ -71,3 +72,5 @@ extern std::string lora_filename;
 extern std::string lora_base;
 extern std::vector<std::string> generated_tokens;
 extern bool generation_finished;
+extern float last_eval_time;
+extern float last_process_time;
