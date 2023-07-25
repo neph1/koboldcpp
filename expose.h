@@ -2,6 +2,7 @@
 
 const int stop_token_max = 10;
 const int ban_token_max = 10;
+const int tensor_split_max = 16;
 // match kobold's sampler list and order
 enum samplers
 {
@@ -13,6 +14,13 @@ enum samplers
     KCPP_SAMPLER_TEMP=5,
     KCPP_SAMPLER_REP_PEN=6,
     KCPP_SAMPLER_MAX
+};
+enum stop_reason
+{
+    INVALID=-1,
+    OUT_OF_TOKENS=0,
+    EOS_TOKEN=1,
+    CUSTOM_STOPPER=2,
 };
 struct load_model_inputs
 {
@@ -36,8 +44,10 @@ struct load_model_inputs
     const int debugmode = 0;
     const int forceversion = 0;
     const int gpulayers = 0;
-    const bool linear_rope;
+    const float rope_freq_scale = 1.0f;
+    const float rope_freq_base = 10000.0f;
     const char * banned_tokens[ban_token_max];
+    const float tensor_split[tensor_split_max];
 };
 struct generation_inputs
 {
@@ -74,3 +84,5 @@ extern std::vector<std::string> generated_tokens;
 extern bool generation_finished;
 extern float last_eval_time;
 extern float last_process_time;
+extern int last_token_count;
+extern stop_reason last_stop_reason;

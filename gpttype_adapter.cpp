@@ -35,6 +35,8 @@ std::string lora_base = "";
 bool generation_finished;
 float last_process_time = 0;
 float last_eval_time = 0;
+int last_token_count = 0;
+stop_reason last_stop_reason = stop_reason::INVALID;
 std::vector<std::string> generated_tokens;
 
 //return val: 0=fail, 1=(original ggml, alpaca), 2=(ggmf), 3=(ggjt)
@@ -177,6 +179,11 @@ llama_token sample_token_mirostat_v2(llama_token_data_array * candidates, std::m
     candidates->size = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const llama_token_data & candidate) {
         return -log2f(candidate.p) > *mu;
     }));
+
+    if (candidates->size == 0) {
+        candidates->size = 1;
+    }
+
     // Normalize the probabilities of the remaining words
     llama_sample_softmax(nullptr, candidates);
     // Sample the next word X from the remaining words
@@ -348,12 +355,32 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     = gpt2_ctx_v1.hparams.n_ctx = gpt2_ctx_v2.hparams.n_ctx = gpt2_ctx_v3.hparams.n_ctx
     = mpt_ctx_v3.hparams.n_ctx = params.n_ctx;
 
-    //handle linear rope
-    if(inputs.linear_rope)
+    //determine rope scaling params
+    float rope_freq_scale = 1.0f;
+    float rope_freq_base = 10000.0f;
+    if(inputs.rope_freq_scale>0.0f)
     {
-        printf("Using Linear RoPE scaling instead of NTK-Aware scaling.\n");
+        rope_freq_scale = inputs.rope_freq_scale;
+        rope_freq_base = inputs.rope_freq_base;
+        printf("Using Custom RoPE scaling (scale:%.3f, base:%.1f).\n",rope_freq_scale,rope_freq_base);
     }
-    set_ntk_rope_scale_mode(!inputs.linear_rope);
+    else
+    {
+        rope_freq_scale = 1.0f;
+        if (params.n_ctx <= 2048) //normie mode
+        {
+            rope_freq_base = 10000.0f;
+        }
+        else
+        {
+            //approximate NTK aware ctx
+            rope_freq_base = (params.n_ctx <= 3072 ? 26000.0f : (params.n_ctx <= 4096 ? 32000.0f : (params.n_ctx <= 6144 ? 54000.0f : 82684.0f)));
+        }
+
+        printf("Using automatic RoPE scaling (scale:%.3f, base:%.1f)\n",rope_freq_scale,rope_freq_base);
+    }
+    gptj_ctx_v3.hparams.rope_freq_scale = neox_ctx_v3.hparams.rope_freq_scale = rope_freq_scale;
+    gptj_ctx_v3.hparams.rope_freq_base = neox_ctx_v3.hparams.rope_freq_base = rope_freq_base;
 
     //handle custom token bans
     banned_tokens.clear();
@@ -444,6 +471,24 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         llama_ctx_params.use_mlock = inputs.use_mlock;
         llama_ctx_params.n_gpu_layers = inputs.gpulayers;
         llama_ctx_params.main_gpu = cu_parseinfo_maindevice;
+        llama_ctx_params.rope_freq_base = rope_freq_base;
+        llama_ctx_params.rope_freq_scale = rope_freq_scale;
+        llama_ctx_params.n_batch = blasbatchsize;
+
+        #if defined(GGML_USE_CUBLAS)
+        bool ts_all_zero = true;
+        for (int i = 0; i < tensor_split_max; ++i) {
+            if (inputs.tensor_split[i] != 0.0f) {
+                ts_all_zero = false;
+                break;
+            }
+        }
+        if(!ts_all_zero)
+        {
+            llama_ctx_params.tensor_split = inputs.tensor_split;
+            printf("CUBLAS: Applying Custom Tensor Split!\n");
+        }
+        #endif
 
         llama_ctx_v3 = llama_init_from_file(modelname.c_str(), llama_ctx_params);
 
@@ -842,6 +887,7 @@ const std::string & gpttype_get_pending_output()
 generation_outputs gpttype_generate(const generation_inputs inputs, generation_outputs &output)
 {
     concat_output = "";
+    last_stop_reason = stop_reason::OUT_OF_TOKENS;
     stop_sequence.clear();
     for(int x=0;x<stop_token_max;++x)
     {
@@ -1404,6 +1450,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                 stopper_unused_tokens = remaining_tokens;
                 printf("\n(EOS token triggered!)");
                 remaining_tokens = 0;
+                last_stop_reason = stop_reason::EOS_TOKEN;
             }
 
             for (const auto &matched : stop_sequence)
@@ -1416,6 +1463,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                     {
                         printf("\n(Stop sequence triggered: <%s>)", matched.c_str());
                     }
+                    last_stop_reason = stop_reason::CUSTOM_STOPPER;
                     break;
                 }
             }
@@ -1449,6 +1497,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
     generation_finished = true;
     last_eval_time = pt2;
     last_process_time = pt1;
+    last_token_count = realnpredict;
     snprintf(output.text, sizeof(output.text), "%s", concat_output.c_str());
 
     return output;

@@ -144,7 +144,7 @@ ifdef LLAMA_CUBLAS
 	CUBLASLD_FLAGS = -lcublas -lculibos -lcudart -lcublasLt -lpthread -ldl -lrt -L/usr/local/cuda/lib64 -L/opt/cuda/lib64 -L$(CUDA_PATH)/targets/x86_64-linux/lib
 	CUBLAS_OBJS = ggml-cuda.o ggml_v2-cuda.o ggml_v2-cuda-legacy.o
 	NVCC      = nvcc
-	NVCCFLAGS = --forward-unknown-to-host-compiler
+	NVCCFLAGS = --forward-unknown-to-host-compiler -use_fast_math
 ifdef CUDA_DOCKER_ARCH
 	NVCCFLAGS += -Wno-deprecated-gpu-targets -arch=$(CUDA_DOCKER_ARCH)
 else
@@ -331,21 +331,26 @@ llama.o: llama.cpp ggml.h ggml-cuda.h llama.h llama-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 common.o: examples/common.cpp examples/common.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+grammar-parser.o: examples/grammar-parser.cpp examples/grammar-parser.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 expose.o: expose.cpp expose.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
-gpttype_adapter_failsafe.o: gpttype_adapter.cpp
+
+# idiotic "for easier compilation"
+GPTTYPE_ADAPTER = gpttype_adapter.cpp otherarch/llama_v2.cpp llama.cpp otherarch/utils.cpp otherarch/gptj_v1.cpp otherarch/gptj_v2.cpp otherarch/gptj_v3.cpp otherarch/gpt2_v1.cpp otherarch/gpt2_v2.cpp otherarch/gpt2_v3.cpp otherarch/rwkv_v2.cpp otherarch/rwkv_v3.cpp otherarch/neox_v2.cpp otherarch/neox_v3.cpp otherarch/mpt_v3.cpp ggml.h ggml-cuda.h llama.h llama-util.h
+gpttype_adapter_failsafe.o: $(GPTTYPE_ADAPTER)
 	$(CXX) $(CXXFLAGS) $(FAILSAFE_FLAGS) -c $< -o $@
-gpttype_adapter.o: gpttype_adapter.cpp
+gpttype_adapter.o: $(GPTTYPE_ADAPTER)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
-gpttype_adapter_clblast.o: gpttype_adapter.cpp
+gpttype_adapter_clblast.o: $(GPTTYPE_ADAPTER)
 	$(CXX) $(CXXFLAGS) $(CLBLAST_FLAGS) -c $< -o $@
-gpttype_adapter_cublas.o: gpttype_adapter.cpp
+gpttype_adapter_cublas.o: $(GPTTYPE_ADAPTER)
 	$(CXX) $(CXXFLAGS) $(CUBLAS_FLAGS) -c $< -o $@
 
 clean:
 	rm -vf *.o main quantize_llama quantize_gpt2 quantize_gptj quantize_neox quantize_mpt quantize-stats perplexity embedding benchmark-matmult save-load-state main.exe quantize_llama.exe quantize_gptj.exe quantize_gpt2.exe quantize_neox.exe quantize_mpt.exe koboldcpp.dll koboldcpp_openblas.dll koboldcpp_failsafe.dll koboldcpp_openblas_noavx2.dll koboldcpp_clblast.dll koboldcpp_cublas.dll koboldcpp.so koboldcpp_openblas.so koboldcpp_failsafe.so koboldcpp_openblas_noavx2.so koboldcpp_clblast.so koboldcpp_cublas.so
 
-main: examples/main/main.cpp build-info.h ggml.o k_quants.o llama.o common.o $(OBJS)
+main: examples/main/main.cpp build-info.h ggml.o k_quants.o llama.o common.o grammar-parser.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 	@echo
 	@echo '====  Run ./main -h for help.  ===='
@@ -358,7 +363,7 @@ koboldcpp_openblas: ggml_openblas.o ggml_v2_openblas.o ggml_v1.o expose.o common
 	$(OPENBLAS_BUILD)
 koboldcpp_failsafe: ggml_failsafe.o ggml_v2_failsafe.o ggml_v1_failsafe.o expose.o common.o gpttype_adapter_failsafe.o k_quants_failsafe.o $(OBJS)
 	$(FAILSAFE_BUILD)
-koboldcpp_openblas_noavx2: ggml_openblas_noavx2.o ggml_v2_openblas_noavx2.o ggml_v1_failsafe.o expose.o common.o gpttype_adapter.o k_quants_noavx2.o $(OBJS)
+koboldcpp_openblas_noavx2: ggml_openblas_noavx2.o ggml_v2_openblas_noavx2.o ggml_v1_failsafe.o expose.o common.o gpttype_adapter_failsafe.o k_quants_noavx2.o $(OBJS)
 	$(OPENBLAS_NOAVX2_BUILD)
 koboldcpp_clblast: ggml_clblast.o ggml_v2_clblast.o ggml_v1.o expose.o common.o gpttype_adapter_clblast.o ggml-opencl.o ggml_v2-opencl.o ggml_v2-opencl-legacy.o k_quants.o $(OBJS)
 	$(CLBLAST_BUILD)
