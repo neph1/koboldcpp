@@ -1,4 +1,4 @@
-default: koboldcpp koboldcpp_failsafe koboldcpp_openblas koboldcpp_openblas_noavx2 koboldcpp_clblast koboldcpp_cublas
+default: koboldcpp koboldcpp_failsafe koboldcpp_openblas koboldcpp_noavx2 koboldcpp_clblast koboldcpp_cublas
 tools: quantize_gpt2 quantize_gptj quantize_llama quantize_neox quantize_mpt
 dev: koboldcpp_openblas
 dev2: koboldcpp_clblast
@@ -42,7 +42,7 @@ endif
 
 # keep standard at C11 and C++11
 CFLAGS   = -I.              -I./include -I./include/CL -I./otherarch -I./otherarch/tools -Ofast -DNDEBUG -std=c11   -fPIC -DGGML_USE_K_QUANTS
-CXXFLAGS = -I. -I./examples -I./include -I./include/CL -I./otherarch -I./otherarch/tools -O3 -DNDEBUG -std=c++11 -fPIC -DGGML_USE_K_QUANTS
+CXXFLAGS = -I. -I./examples -I./include -I./include/CL -I./otherarch -I./otherarch/tools -Ofast -DNDEBUG -std=c++11 -fPIC -DGGML_USE_K_QUANTS
 LDFLAGS  =
 
 # these are used on windows, to build some libraries with extra old device compatibility
@@ -165,20 +165,34 @@ else ifdef LLAMA_CUDA_DMMV_Y
 else
 	NVCCFLAGS += -DGGML_CUDA_MMV_Y=1
 endif # LLAMA_CUDA_MMV_Y
+ifdef LLAMA_CUDA_F16
+	NVCCFLAGS += -DGGML_CUDA_F16
+endif # LLAMA_CUDA_F16
 ifdef LLAMA_CUDA_DMMV_F16
-	NVCCFLAGS += -DGGML_CUDA_DMMV_F16
+	NVCCFLAGS += -DGGML_CUDA_F16
 endif # LLAMA_CUDA_DMMV_F16
 ifdef LLAMA_CUDA_KQUANTS_ITER
 	NVCCFLAGS += -DK_QUANTS_PER_ITERATION=$(LLAMA_CUDA_KQUANTS_ITER)
 else
 	NVCCFLAGS += -DK_QUANTS_PER_ITERATION=2
 endif
+ifdef LLAMA_CUDA_MMQ_Y
+	NVCCFLAGS += -DGGML_CUDA_MMQ_Y=$(LLAMA_CUDA_MMQ_Y)
+else
+	NVCCFLAGS += -DGGML_CUDA_MMQ_Y=64
+endif # LLAMA_CUDA_MMQ_Y
+#ifdef LLAMA_CUDA_CUBLAS
+#	NVCCFLAGS += -DGGML_CUDA_CUBLAS
+#endif # LLAMA_CUDA_CUBLAS
+ifdef LLAMA_CUDA_CCBIN
+	NVCCFLAGS += -ccbin $(LLAMA_CUDA_CCBIN)
+endif
 ggml-cuda.o: ggml-cuda.cu ggml-cuda.h
-	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) $(CUBLAS_FLAGS) $(CUBLAS_CXXFLAGS) -Wno-pedantic -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(subst -Ofast,-O3,$(CXXFLAGS)) $(CUBLAS_FLAGS) $(CUBLAS_CXXFLAGS) -Wno-pedantic -c $< -o $@
 ggml_v2-cuda.o: otherarch/ggml_v2-cuda.cu otherarch/ggml_v2-cuda.h
-	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) $(CUBLAS_FLAGS) $(CUBLAS_CXXFLAGS) -Wno-pedantic -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(subst -Ofast,-O3,$(CXXFLAGS)) $(CUBLAS_FLAGS) $(CUBLAS_CXXFLAGS) -Wno-pedantic -c $< -o $@
 ggml_v2-cuda-legacy.o: otherarch/ggml_v2-cuda-legacy.cu otherarch/ggml_v2-cuda-legacy.h
-	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) $(CUBLAS_FLAGS) $(CUBLAS_CXXFLAGS) -Wno-pedantic -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(subst -Ofast,-O3,$(CXXFLAGS)) $(CUBLAS_FLAGS) $(CUBLAS_CXXFLAGS) -Wno-pedantic -c $< -o $@
 endif # LLAMA_CUBLAS
 
 ifdef LLAMA_METAL
@@ -213,7 +227,7 @@ endif
 DEFAULT_BUILD =
 FAILSAFE_BUILD =
 OPENBLAS_BUILD =
-OPENBLAS_NOAVX2_BUILD =
+NOAVX2_BUILD =
 CLBLAST_BUILD =
 CUBLAS_BUILD =
 
@@ -221,7 +235,7 @@ ifeq ($(OS),Windows_NT)
 	DEFAULT_BUILD = $(CXX) $(CXXFLAGS)  $^ -shared -o $@.dll $(LDFLAGS)
 	FAILSAFE_BUILD = $(CXX) $(CXXFLAGS) $^ -shared -o $@.dll $(LDFLAGS)
 	OPENBLAS_BUILD = $(CXX) $(CXXFLAGS) $^ lib/libopenblas.lib -shared -o $@.dll $(LDFLAGS)
-	OPENBLAS_NOAVX2_BUILD = $(CXX) $(CXXFLAGS) $^ lib/libopenblas.lib -shared -o $@.dll $(LDFLAGS)
+	NOAVX2_BUILD = $(CXX) $(CXXFLAGS) $^ -shared -o $@.dll $(LDFLAGS)
 	CLBLAST_BUILD = $(CXX) $(CXXFLAGS) $^ lib/OpenCL.lib lib/clblast.lib -shared -o $@.dll $(LDFLAGS)
 
 ifdef LLAMA_CUBLAS
@@ -233,7 +247,7 @@ else
 	FAILSAFE_BUILD = $(CXX) $(CXXFLAGS) $^ -shared -o $@.so $(LDFLAGS)
 	ifdef LLAMA_OPENBLAS
 	OPENBLAS_BUILD = $(CXX) $(CXXFLAGS) $^ $(ARCH_ADD) -lopenblas -shared -o $@.so $(LDFLAGS)
-	OPENBLAS_NOAVX2_BUILD = $(CXX) $(CXXFLAGS) $^ $(ARCH_ADD) -lopenblas -shared -o $@.so $(LDFLAGS)
+	NOAVX2_BUILD = $(CXX) $(CXXFLAGS) $^ $(ARCH_ADD) -lopenblas -shared -o $@.so $(LDFLAGS)
 	endif
 	ifdef LLAMA_CLBLAST
         ifeq ($(UNAME_S),Darwin)
@@ -283,8 +297,8 @@ ggml_openblas.o: ggml.c ggml.h
 	$(CC)  $(CFLAGS) $(FULLCFLAGS) $(OPENBLAS_FLAGS) -c $< -o $@
 ggml_failsafe.o: ggml.c ggml.h
 	$(CC)  $(CFLAGS) $(NONECFLAGS) -c $< -o $@
-ggml_openblas_noavx2.o: ggml.c ggml.h
-	$(CC)  $(CFLAGS) $(SIMPLECFLAGS) $(OPENBLAS_FLAGS) -c $< -o $@
+ggml_noavx2.o: ggml.c ggml.h
+	$(CC)  $(CFLAGS) $(SIMPLECFLAGS) -c $< -o $@
 ggml_clblast.o: ggml.c ggml.h
 	$(CC)  $(CFLAGS) $(FULLCFLAGS) $(CLBLAST_FLAGS) -c $< -o $@
 ggml_cublas.o: ggml.c ggml.h
@@ -298,6 +312,10 @@ k_quants_noavx2.o: k_quants.c k_quants.h ggml.h ggml-cuda.h
 k_quants_failsafe.o: k_quants.c k_quants.h ggml.h ggml-cuda.h
 	$(CC)  $(CFLAGS) $(NONECFLAGS) -c $< -o $@
 
+#there's no intrinsics or special gpu ops used here, so we can have a universal object
+ggml-alloc.o: ggml-alloc.c ggml.h ggml-alloc.h
+	$(CC)  $(CFLAGS) -c $< -o $@
+
 #version 2 libs
 ggml_v2.o: otherarch/ggml_v2.c otherarch/ggml_v2.h
 	$(CC)  $(CFLAGS) $(FULLCFLAGS) -c $< -o $@
@@ -305,8 +323,8 @@ ggml_v2_openblas.o: otherarch/ggml_v2.c otherarch/ggml_v2.h
 	$(CC)  $(CFLAGS) $(FULLCFLAGS) $(OPENBLAS_FLAGS) -c $< -o $@
 ggml_v2_failsafe.o: otherarch/ggml_v2.c otherarch/ggml_v2.h
 	$(CC)  $(CFLAGS) $(NONECFLAGS) -c $< -o $@
-ggml_v2_openblas_noavx2.o: otherarch/ggml_v2.c otherarch/ggml_v2.h
-	$(CC)  $(CFLAGS) $(SIMPLECFLAGS) $(OPENBLAS_FLAGS) -c $< -o $@
+ggml_v2_noavx2.o: otherarch/ggml_v2.c otherarch/ggml_v2.h
+	$(CC)  $(CFLAGS) $(SIMPLECFLAGS) -c $< -o $@
 ggml_v2_clblast.o: otherarch/ggml_v2.c otherarch/ggml_v2.h
 	$(CC)  $(CFLAGS) $(FULLCFLAGS) $(CLBLAST_FLAGS) -c $< -o $@
 ggml_v2_cublas.o: otherarch/ggml_v2.c otherarch/ggml_v2.h
@@ -327,9 +345,11 @@ ggml_v2-opencl-legacy.o: otherarch/ggml_v2-opencl-legacy.c otherarch/ggml_v2-ope
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # intermediate objects
-llama.o: llama.cpp ggml.h ggml-cuda.h llama.h llama-util.h
+llama.o: llama.cpp ggml.h ggml-alloc.h ggml-cuda.h ggml-metal.h llama.h llama-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 common.o: examples/common.cpp examples/common.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+console.o: examples/console.cpp examples/console.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 grammar-parser.o: examples/grammar-parser.cpp examples/grammar-parser.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -348,37 +368,37 @@ gpttype_adapter_cublas.o: $(GPTTYPE_ADAPTER)
 	$(CXX) $(CXXFLAGS) $(CUBLAS_FLAGS) -c $< -o $@
 
 clean:
-	rm -vf *.o main quantize_llama quantize_gpt2 quantize_gptj quantize_neox quantize_mpt quantize-stats perplexity embedding benchmark-matmult save-load-state main.exe quantize_llama.exe quantize_gptj.exe quantize_gpt2.exe quantize_neox.exe quantize_mpt.exe koboldcpp.dll koboldcpp_openblas.dll koboldcpp_failsafe.dll koboldcpp_openblas_noavx2.dll koboldcpp_clblast.dll koboldcpp_cublas.dll koboldcpp.so koboldcpp_openblas.so koboldcpp_failsafe.so koboldcpp_openblas_noavx2.so koboldcpp_clblast.so koboldcpp_cublas.so
+	rm -vf *.o main quantize_llama quantize_gpt2 quantize_gptj quantize_neox quantize_mpt quantize-stats perplexity embedding benchmark-matmult save-load-state main.exe quantize_llama.exe quantize_gptj.exe quantize_gpt2.exe quantize_neox.exe quantize_mpt.exe koboldcpp.dll koboldcpp_openblas.dll koboldcpp_failsafe.dll koboldcpp_noavx2.dll koboldcpp_clblast.dll koboldcpp_cublas.dll koboldcpp.so koboldcpp_openblas.so koboldcpp_failsafe.so koboldcpp_noavx2.so koboldcpp_clblast.so koboldcpp_cublas.so
 
-main: examples/main/main.cpp build-info.h ggml.o k_quants.o llama.o common.o grammar-parser.o $(OBJS)
+main: examples/main/main.cpp build-info.h ggml.o k_quants.o ggml-alloc.o llama.o common.o console.o grammar-parser.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 	@echo
 	@echo '====  Run ./main -h for help.  ===='
 	@echo
 
 #generated libraries
-koboldcpp: ggml.o ggml_v2.o ggml_v1.o expose.o common.o gpttype_adapter.o k_quants.o $(OBJS)
+koboldcpp: ggml.o ggml_v2.o ggml_v1.o expose.o common.o gpttype_adapter.o k_quants.o ggml-alloc.o $(OBJS)
 	$(DEFAULT_BUILD)
-koboldcpp_openblas: ggml_openblas.o ggml_v2_openblas.o ggml_v1.o expose.o common.o gpttype_adapter.o k_quants.o $(OBJS)
+koboldcpp_openblas: ggml_openblas.o ggml_v2_openblas.o ggml_v1.o expose.o common.o gpttype_adapter.o k_quants.o ggml-alloc.o $(OBJS)
 	$(OPENBLAS_BUILD)
-koboldcpp_failsafe: ggml_failsafe.o ggml_v2_failsafe.o ggml_v1_failsafe.o expose.o common.o gpttype_adapter_failsafe.o k_quants_failsafe.o $(OBJS)
+koboldcpp_failsafe: ggml_failsafe.o ggml_v2_failsafe.o ggml_v1_failsafe.o expose.o common.o gpttype_adapter_failsafe.o k_quants_failsafe.o ggml-alloc.o $(OBJS)
 	$(FAILSAFE_BUILD)
-koboldcpp_openblas_noavx2: ggml_openblas_noavx2.o ggml_v2_openblas_noavx2.o ggml_v1_failsafe.o expose.o common.o gpttype_adapter_failsafe.o k_quants_noavx2.o $(OBJS)
-	$(OPENBLAS_NOAVX2_BUILD)
-koboldcpp_clblast: ggml_clblast.o ggml_v2_clblast.o ggml_v1.o expose.o common.o gpttype_adapter_clblast.o ggml-opencl.o ggml_v2-opencl.o ggml_v2-opencl-legacy.o k_quants.o $(OBJS)
+koboldcpp_noavx2: ggml_noavx2.o ggml_v2_noavx2.o ggml_v1_failsafe.o expose.o common.o gpttype_adapter_failsafe.o k_quants_noavx2.o ggml-alloc.o $(OBJS)
+	$(NOAVX2_BUILD)
+koboldcpp_clblast: ggml_clblast.o ggml_v2_clblast.o ggml_v1.o expose.o common.o gpttype_adapter_clblast.o ggml-opencl.o ggml_v2-opencl.o ggml_v2-opencl-legacy.o k_quants.o ggml-alloc.o $(OBJS)
 	$(CLBLAST_BUILD)
-koboldcpp_cublas: ggml_cublas.o ggml_v2_cublas.o ggml_v1.o expose.o common.o gpttype_adapter_cublas.o k_quants.o $(CUBLAS_OBJS) $(OBJS)
+koboldcpp_cublas: ggml_cublas.o ggml_v2_cublas.o ggml_v1.o expose.o common.o gpttype_adapter_cublas.o k_quants.o ggml-alloc.o $(CUBLAS_OBJS) $(OBJS)
 	$(CUBLAS_BUILD)
 
-quantize_llama: examples/quantize/quantize.cpp ggml.o llama.o k_quants.o
+quantize_llama: examples/quantize/quantize.cpp ggml.o llama.o k_quants.o ggml-alloc.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-quantize_gptj: ggml.o llama.o k_quants.o otherarch/tools/gptj_quantize.cpp otherarch/tools/common-ggml.cpp
+quantize_gptj: ggml.o llama.o k_quants.o ggml-alloc.o otherarch/tools/gptj_quantize.cpp otherarch/tools/common-ggml.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-quantize_gpt2: ggml.o llama.o k_quants.o otherarch/tools/gpt2_quantize.cpp otherarch/tools/common-ggml.cpp
+quantize_gpt2: ggml.o llama.o k_quants.o ggml-alloc.o otherarch/tools/gpt2_quantize.cpp otherarch/tools/common-ggml.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-quantize_neox: ggml.o llama.o k_quants.o otherarch/tools/neox_quantize.cpp otherarch/tools/common-ggml.cpp
+quantize_neox: ggml.o llama.o k_quants.o ggml-alloc.o otherarch/tools/neox_quantize.cpp otherarch/tools/common-ggml.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-quantize_mpt: ggml.o llama.o k_quants.o otherarch/tools/mpt_quantize.cpp otherarch/tools/common-ggml.cpp
+quantize_mpt: ggml.o llama.o k_quants.o ggml-alloc.o otherarch/tools/mpt_quantize.cpp otherarch/tools/common-ggml.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 

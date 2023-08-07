@@ -243,7 +243,7 @@ void sample_temperature(llama_token_data_array * candidates_p, float temp)
     if (temp <= 0)
     {
         // Imitate greedy sampling
-        temp = 0.01f; //cannot be zero else div0
+        temp = 0.00390625f; //cannot be zero else div0, this is 1/256
         llama_sample_temperature(nullptr, candidates_p, temp);
         llama_sample_top_k(nullptr, candidates_p, 1, 1); //only want first candidate
     }
@@ -347,6 +347,10 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     debugmode = inputs.debugmode;
     unbanTokens = inputs.unban_tokens;
     blasbatchsize = inputs.blasbatchsize;
+    if(blasbatchsize<=0)
+    {
+        blasbatchsize = 8;
+    }
     params.memory_f16 = inputs.f16_kv;
     params.n_ctx = inputs.max_context_length;
 
@@ -374,7 +378,8 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         else
         {
             //approximate NTK aware ctx
-            rope_freq_base = (params.n_ctx <= 3072 ? 26000.0f : (params.n_ctx <= 4096 ? 32000.0f : (params.n_ctx <= 6144 ? 54000.0f : 82684.0f)));
+            rope_freq_base = (params.n_ctx <= 3072 ? 26000.0f : (params.n_ctx <= 4096 ? 32000.0f : (params.n_ctx <= 6144 ? 54000.0f : (params.n_ctx <= 8192 ? 82684.0f : (params.n_ctx <= 12288 ? 140000.0f : 200000.0f)))));
+
         }
 
         printf("Using automatic RoPE scaling (scale:%.3f, base:%.1f)\n",rope_freq_scale,rope_freq_base);
@@ -466,6 +471,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         llama_ctx_params.seed = -1;
         llama_ctx_params.f16_kv = inputs.f16_kv;
         llama_ctx_params.low_vram = inputs.low_vram;
+        llama_ctx_params.mul_mat_q = inputs.use_mmq;
         llama_ctx_params.logits_all = false;
         llama_ctx_params.use_mmap = inputs.use_mmap;
         llama_ctx_params.use_mlock = inputs.use_mlock;

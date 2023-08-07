@@ -30,6 +30,7 @@ struct load_model_inputs
     const int batch_size;
     const bool f16_kv;
     const bool low_vram;
+    const bool use_mmq;
     const char * executable_path;
     const char * model_filename;
     const char * lora_filename;
@@ -74,7 +75,7 @@ struct generation_inputs
 struct generation_outputs
 {
     int status = -1;
-    char text[16384]; //16kb should be enough for any response
+    char text[24576]; //24kb should be enough for any response
 };
 
 extern std::string executable_path;
