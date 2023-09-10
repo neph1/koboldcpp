@@ -301,7 +301,11 @@ bool mpt_model_load(const std::string & fname, mpt_model & model, gpt_vocab & vo
         const auto & hparams = model.hparams;
         size_t vram_total = 0;
         const int n_gpu = std::min(gpulayers, int(hparams.n_layers));
-        fprintf(stderr, "%s: [GPU] offloading %d layers to GPU\n", __func__, n_gpu);
+        #if defined(GGML_USE_CLBLAST)
+        fprintf(stderr, "%s: [opencl] offloading %d layers to GPU\n", __func__, n_gpu);
+        #else
+        fprintf(stderr, "%s: [CUDA] offloading %d layers to GPU\n", __func__, n_gpu);
+        #endif
         for (int i = 0; i < n_gpu; ++i) {
             const auto & layer = model.layers[i];
             layer.ffn_up_proj->backend = GGML_BACKEND_GPU;
@@ -320,7 +324,11 @@ bool mpt_model_load(const std::string & fname, mpt_model & model, gpt_vocab & vo
             ggml_cuda_transform_tensor(layer.c_attn_out_proj_weight->data,layer.c_attn_out_proj_weight); vram_total += ggml_nbytes(layer.c_attn_out_proj_weight);
             #endif
         }
-        fprintf(stderr, "%s: [GPU] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
+        #if defined(GGML_USE_CLBLAST)
+            fprintf(stderr, "%s: [opencl] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
+        #else
+            fprintf(stderr, "%s: [CUDA] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
+        #endif
     }
     #endif
 
@@ -399,7 +407,7 @@ bool mpt_eval(const mpt_model & model, const int n_threads, const int n_past,
 
         // a = self.ln_1(x)
         {
-            cur = ggml_norm(ctx0, inpL);
+            cur = ggml_norm(ctx0, inpL, default_norm_eps);
 
             cur = ggml_mul(ctx0, ggml_repeat(ctx0, model.layers[il].norm_1_weight, cur), cur);
         }
@@ -497,7 +505,7 @@ bool mpt_eval(const mpt_model & model, const int n_threads, const int n_past,
 
         // m = self.ln_2(x)
         {
-            cur = ggml_norm(ctx0, inpL);
+            cur = ggml_norm(ctx0, inpL, default_norm_eps);
 
             cur = ggml_mul(ctx0, ggml_repeat(ctx0, model.layers[il].norm_2_weight, cur), cur);
         }
@@ -525,7 +533,7 @@ bool mpt_eval(const mpt_model & model, const int n_threads, const int n_past,
 
     // norm
     {
-        inpL = ggml_norm(ctx0, inpL);
+        inpL = ggml_norm(ctx0, inpL, default_norm_eps);
         // inpL = ln_f_g*inpL
         inpL = ggml_mul(ctx0, ggml_repeat(ctx0, model.norm_f_weight, inpL), inpL);
     }

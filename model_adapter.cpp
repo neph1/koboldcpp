@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "model_adapter.h"
+#include "ggml.h"
 
 #include <chrono>
 
@@ -79,7 +80,7 @@ void print_tok_vec(std::vector<float> &embd)
 }
 
 //return val: 0=fail, 1=(original ggml, alpaca), 2=(ggmf), 3=(ggjt)
- FileFormat check_file_format(const std::string & fname)
+ FileFormat check_file_format(const std::string & fname, FileFormatExtraMeta * fileformatmeta)
  {
     std::vector<char> f_buf(1024*1024);
 
@@ -133,28 +134,36 @@ void print_tok_vec(std::vector<float> &embd)
        else if(vocabsiz==50257 || (vocabsiz>=49152&&vocabsiz<=49157)) //49152-6 is starcoder
        {
            fileformat = FileFormat::GPT2_1;
-           uint32_t temp;
-           fin.read((char *)&temp, sizeof(temp)); //ctx
-           fin.read((char *)&temp, sizeof(temp)); //n_embd
-           fin.read((char *)&temp, sizeof(temp)); //n_head
+           uint32_t temp, v1,v2,v3;
+           fin.read((char *)&v1, sizeof(temp)); //ctx
+           fin.read((char *)&v2, sizeof(temp)); //n_embd
+           fin.read((char *)&v3, sizeof(temp)); //n_head
            fin.read((char *)&temp, sizeof(temp)); //n_layer
-           fin.read((char *)&temp, sizeof(temp)); //f16
-           const int32_t qntvr = temp / 1000;
-           temp %= 1000;
-           if (qntvr != 0)
+           if(vocabsiz==49152 && v1==4096 && v2==2560 && v3==32 && temp==32)
            {
-               if (qntvr == 1)
-               {
-                   fileformat = FileFormat::GPT2_3;
-               }
-               else
-               {
-                   fileformat = FileFormat::GPT2_4;
-               }
+                //special case, Stablecode Completion Alpha 3B
+               fileformat = FileFormat::NEOX_6;
            }
-           else if (temp != 0 && temp != 1)
+           else
            {
-               fileformat = FileFormat::GPT2_2; //quantized format cannot be legacy type
+                fin.read((char *)&temp, sizeof(temp)); //f16
+                const int32_t qntvr = temp / 1000;
+                temp %= 1000;
+                if (qntvr != 0)
+                {
+                    if (qntvr == 1)
+                    {
+                        fileformat = FileFormat::GPT2_3;
+                    }
+                    else
+                    {
+                        fileformat = FileFormat::GPT2_4;
+                    }
+                }
+                else if (temp != 0 && temp != 1)
+                {
+                    fileformat = FileFormat::GPT2_2; //quantized format cannot be legacy type
+                }
            }
        }
        else if(vocabsiz < 31998 || vocabsiz > 33000)
@@ -243,7 +252,51 @@ void print_tok_vec(std::vector<float> &embd)
             fileformat = FileFormat::GGJT_2;
         }
     }
-    fin.close();
+    else if(magic == 0x46554747)
+    {
+        fin.close();
+        fileformat = FileFormat::GGUF_LLAMA;
+
+        struct gguf_init_params ggufparams;
+        ggufparams.no_alloc = true;
+        ggufparams.ctx = NULL;
+
+        auto ctx  = gguf_init_from_file(fname.c_str(), ggufparams);
+
+        auto keyidx = gguf_find_key(ctx, "general.architecture");
+        std::string modelarch = "";
+        if (keyidx != -1) { modelarch = gguf_get_val_str(ctx, keyidx); }
+
+        if(modelarch=="llama")
+        {
+            fileformat = FileFormat::GGUF_LLAMA;
+        }
+        else if(modelarch=="falcon")
+        {
+            fileformat = FileFormat::GGUF_FALCON; //uses the same loader
+            printf("\nDetected GGUF FALCON format.\n");
+        }
+        else
+        {
+            printf("\nERROR: Detected unimplemented GGUF Arch: %s\n",modelarch.c_str());
+        }
+
+        if(modelarch!="" && fileformatmeta!=nullptr)
+        {
+            std::string fkey = modelarch+".context_length";
+            auto keyidx = gguf_find_key(ctx, fkey.c_str());
+            if (keyidx != -1) {
+                fileformatmeta->n_ctx_train = gguf_get_val_u32(ctx, keyidx);
+            }
+        }
+        gguf_free(ctx);
+    }
+
+    if(fin.is_open())
+    {
+        fin.close();
+    }
+
 
     return fileformat;
  }

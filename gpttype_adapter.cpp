@@ -8,12 +8,14 @@
 //Python will ALWAYS provide the memory, we just write to it.
 
 #include <time.h>
+#include <mutex>
 #include "model_adapter.h"
 #include "otherarch.h"
 
 //for easier compilation
 //concat source files into one file for compilation purposes
 #include "llama_v2.cpp"
+#include "llama_v3.cpp"
 #include "llama.cpp"
 #include "utils.cpp"
 #include "gptj_v1.cpp"
@@ -59,10 +61,9 @@ static mpt_model mpt_ctx_v3;
 
 static rwkv_v2_context * rwkv_ctx_v2;
 static rwkv_context * rwkv_ctx_v3;
-static llama_v2_context_params llama_ctx_params_v2;
-static llama_context_params llama_ctx_params;
 static llama_v2_context * llama_ctx_v2;
-static llama_context * llama_ctx_v3;
+static llama_v3_context * llama_ctx_v3;
+static llama_context * llama_ctx_v4;
 
 static gpt_params params;
 static int n_past = 0;
@@ -85,7 +86,9 @@ static std::vector<int> banned_token_ids;
 static std::vector<llama_token_data> top_picks;
 static int remaining_tokens = 0;
 static int stopper_unused_tokens = 0;
+static std::mutex concat_output_mtx;
 static std::string concat_output = "";
+static std::string concat_output_reader_copy = "";
 
 inline bool IsNanCheck(float f)
 {
@@ -326,7 +329,11 @@ static std::string FileFormatTokenizeID(int id, FileFormat file_format)
     }
     else if (file_format == FileFormat::GGJT_3)
     {
-        return std::string(llama_token_to_str(llama_ctx_v3, id));
+        return std::string(llama_v3_token_to_str(llama_ctx_v3, id));
+    }
+    else if(file_format == FileFormat::GGUF_LLAMA || file_format==FileFormat::GGUF_FALCON)
+    {
+        return std::string(llama_token_to_str(llama_ctx_v4, id));
     }
     else
     {
@@ -334,7 +341,59 @@ static std::string FileFormatTokenizeID(int id, FileFormat file_format)
     }
 }
 
-ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in_file_format)
+static void TokenizeString(const std::string & str_to_tokenize, std::vector<int> & output_tokens, FileFormat file_format)
+{
+    if (file_format == FileFormat::GGML || file_format == FileFormat::GGHF || file_format == FileFormat::GGJT || file_format == FileFormat::GGJT_2  || file_format == FileFormat::GGJT_3 || file_format == FileFormat::GGUF_LLAMA || file_format==FileFormat::GGUF_FALCON)
+    {
+        if(file_format == FileFormat::GGHF || file_format == FileFormat::GGJT || file_format == FileFormat::GGJT_2 )
+        {
+            output_tokens = ::llama_v2_tokenize(llama_ctx_v2, str_to_tokenize, true);
+        }
+        else if (file_format == FileFormat::GGML)
+        {
+            output_tokens = ::legacy_llama_v2_tokenize(llama_ctx_v2, str_to_tokenize, true);
+        }
+        else if (file_format == FileFormat::GGJT_3)
+        {
+            output_tokens = ::llama_v3_tokenize(llama_ctx_v3, str_to_tokenize, true);
+        }
+        else
+        {
+            output_tokens = ::llama_tokenize(llama_ctx_v4, str_to_tokenize, true);
+        }
+    }
+    else
+    {
+        // tokenize the prompt
+        output_tokens = ::gpt_tokenize(vocab, str_to_tokenize);
+    }
+}
+
+static float LowestLogit(const std::vector<float> & logits)
+{
+    int topid = std::min_element(logits.begin(), logits.end()) - logits.begin();
+    float v = logits[topid];
+    return (v < 0 ? (v-8) : 0);
+}
+static float LowestLogit(const float *logits, size_t size)
+{
+    if (size == 0) {
+        // Handle the case of an empty array
+        return 0.0;
+    }
+    int topid = std::min_element(logits, logits + size) - logits;
+    float v = logits[topid];
+    return (v < 0 ? (v-8) : 0);
+}
+
+static std::string RemoveBell(const std::string & input) //removes the bell character
+{
+    std::string word2;
+    std::remove_copy(input.begin(), input.end(), std::back_inserter(word2), '\a');
+    return word2;
+}
+
+ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in_file_format, FileFormatExtraMeta file_format_meta)
 {
     ggml_time_init();
 
@@ -378,7 +437,13 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         else
         {
             //approximate NTK aware ctx
-            rope_freq_base = (params.n_ctx <= 3072 ? 26000.0f : (params.n_ctx <= 4096 ? 32000.0f : (params.n_ctx <= 6144 ? 54000.0f : (params.n_ctx <= 8192 ? 82684.0f : (params.n_ctx <= 12288 ? 140000.0f : 200000.0f)))));
+            auto effectivenctx = params.n_ctx;
+            if((file_format == FileFormat::GGUF_LLAMA || file_format==FileFormat::GGUF_FALCON) && file_format_meta.n_ctx_train > 2048)
+            {
+                float factor = file_format_meta.n_ctx_train/2048;
+                effectivenctx = effectivenctx/factor;
+            }
+            rope_freq_base = (effectivenctx <= 3072 ? 26000.0f : (effectivenctx <= 4096 ? 32000.0f : (effectivenctx <= 6144 ? 54000.0f : (effectivenctx <= 8192 ? 82684.0f : (effectivenctx <= 12288 ? 140000.0f : 200000.0f)))));
 
         }
 
@@ -401,7 +466,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     //this is used for the mem_per_token eval, openblas needs more RAM
     bool use_scratch = ggml_cpu_has_gpublas();
 
-    int cu_parseinfo_maindevice = inputs.cublas_info<0?0:inputs.cublas_info;
+    int cu_parseinfo_maindevice = inputs.cublas_info<=0?0:inputs.cublas_info;
 
     printf("System Info: %s\n", llama_print_system_info());
     #if defined(GGML_USE_CUBLAS)
@@ -416,8 +481,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     {
         //newer format has bit unshuffling
         SetQuantsUnshuffled(file_format == FileFormat::GGJT_2);
-
-        llama_ctx_params_v2 = llama_v2_context_default_params();
+        llama_v2_context_params llama_ctx_params_v2 = llama_v2_context_default_params();
         llama_ctx_params_v2.n_ctx = inputs.max_context_length;
         //llama_ctx_params.n_parts = -1;
         llama_ctx_params_v2.seed = -1;
@@ -465,7 +529,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
     }
     else if(file_format == FileFormat::GGJT_3)
     {
-        llama_ctx_params = llama_context_default_params();
+        llama_v3_context_params llama_ctx_params = llama_v3_context_default_params();
         llama_ctx_params.n_ctx = inputs.max_context_length;
         //llama_ctx_paran_parts = -1;
         llama_ctx_params.seed = -1;
@@ -492,11 +556,10 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         if(!ts_all_zero)
         {
             llama_ctx_params.tensor_split = inputs.tensor_split;
-            printf("CUBLAS: Applying Custom Tensor Split!\n");
         }
         #endif
 
-        llama_ctx_v3 = llama_init_from_file(modelname.c_str(), llama_ctx_params);
+        llama_ctx_v3 = llama_v3_init_from_file(modelname.c_str(), llama_ctx_params);
 
         if (llama_ctx_v3 == NULL)
         {
@@ -513,7 +576,7 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
                 lora_base_arg = lora_base.c_str();
             }
 
-            int err = llama_apply_lora_from_file(llama_ctx_v3,
+            int err = llama_v3_apply_lora_from_file(llama_ctx_v3,
                                                  lora_filename.c_str(),
                                                  lora_base_arg,
                                                  n_threads);
@@ -526,7 +589,83 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
 
         //determine mem per token
         const std::vector<int> tmp = {1, 2, 3, 4};
-        auto er = llama_eval(llama_ctx_v3, tmp.data(), tmp.size(), 0, params.n_threads);
+        auto er = llama_v3_eval(llama_ctx_v3, tmp.data(), tmp.size(), 0, params.n_threads);
+        if(er!=0)
+        {
+            printf("\nLLAMA EVAL returned nonzero!\n");
+        }
+        return ModelLoadResult::SUCCESS;
+    }
+    else if(file_format==FileFormat::GGUF_LLAMA || file_format==FileFormat::GGUF_FALCON)
+    {
+        llama_context_params llama_ctx_params = llama_context_default_params();
+        llama_ctx_params.n_ctx = inputs.max_context_length;
+        //llama_ctx_paran_parts = -1;
+        llama_ctx_params.seed = -1;
+        llama_ctx_params.f16_kv = inputs.f16_kv;
+        llama_ctx_params.low_vram = inputs.low_vram;
+        llama_ctx_params.mul_mat_q = inputs.use_mmq;
+        llama_ctx_params.logits_all = false;
+        llama_ctx_params.use_mmap = inputs.use_mmap;
+        llama_ctx_params.use_mlock = inputs.use_mlock;
+        llama_ctx_params.n_gpu_layers = inputs.gpulayers;
+        #if defined(GGML_USE_CLBLAST)
+        if(file_format==FileFormat::GGUF_FALCON && llama_ctx_params.n_gpu_layers>0)
+        {
+            printf("\nGPU layer offload for GGUF FALCON on OpenCL is known to have issues, it has been set to 0.\n");
+            llama_ctx_params.n_gpu_layers = 0;
+        }
+        #endif
+        llama_ctx_params.main_gpu = cu_parseinfo_maindevice;
+        llama_ctx_params.rope_freq_base = rope_freq_base;
+        llama_ctx_params.rope_freq_scale = rope_freq_scale;
+        llama_ctx_params.n_batch = blasbatchsize;
+
+        #if defined(GGML_USE_CUBLAS)
+        bool ts_all_zero = true;
+        for (int i = 0; i < tensor_split_max; ++i) {
+            if (inputs.tensor_split[i] != 0.0f) {
+                ts_all_zero = false;
+                break;
+            }
+        }
+        if(!ts_all_zero)
+        {
+            llama_ctx_params.tensor_split = inputs.tensor_split;
+        }
+        #endif
+
+        llama_ctx_v4 = llama_init_from_file(modelname.c_str(), llama_ctx_params);
+
+        if (llama_ctx_v4 == NULL)
+        {
+            fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, modelname.c_str());
+            return ModelLoadResult::FAIL;
+        }
+        if (lora_filename != "")
+        {
+            printf("\nAttempting to apply LORA adapter: %s\n", lora_filename.c_str());
+
+            const char * lora_base_arg = NULL;
+            if (lora_base != "") {
+                printf("Using LORA base model: %s\n", lora_base.c_str());
+                lora_base_arg = lora_base.c_str();
+            }
+
+            int err = llama_apply_lora_from_file(llama_ctx_v4,
+                                                 lora_filename.c_str(),
+                                                 lora_base_arg,
+                                                 n_threads);
+            if (err != 0)
+            {
+                fprintf(stderr, "%s: error: failed to apply lora adapter\n", __func__);
+                return ModelLoadResult::FAIL;
+            }
+        }
+
+        //determine mem per token
+        const std::vector<int> tmp = {1, 2, 3, 4};
+        auto er = llama_eval(llama_ctx_v4, tmp.data(), tmp.size(), 0, params.n_threads);
         if(er!=0)
         {
             printf("\nLLAMA EVAL returned nonzero!\n");
@@ -885,14 +1024,35 @@ bool gpttype_generate_abort()
     return true;
 }
 
+int gpttype_token_count(const std::string & input)
+{
+    if(debugmode==1)
+    {
+        printf("\nFileFormat: %d, Tokenizing: %s",file_format ,input.c_str());
+    }
+    std::vector<int> toks;
+    TokenizeString(input, toks, file_format);
+    int tokcount = toks.size();
+    if(debugmode==1)
+    {
+        printf("\nTokens Counted: %d\n",tokcount);
+    }
+    return tokcount;
+}
+
 const std::string & gpttype_get_pending_output()
 {
-    return concat_output;
+    concat_output_mtx.lock();
+    concat_output_reader_copy = concat_output;
+    concat_output_mtx.unlock();
+    return concat_output_reader_copy;
 }
 
 generation_outputs gpttype_generate(const generation_inputs inputs, generation_outputs &output)
 {
+    concat_output_mtx.lock();
     concat_output = "";
+    concat_output_mtx.unlock();
     last_stop_reason = stop_reason::OUT_OF_TOKENS;
     stop_sequence.clear();
     for(int x=0;x<stop_token_max;++x)
@@ -939,28 +1099,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
 
     // tokenize the prompt
     std::vector<int> embd_inp;
-
-    if (file_format == FileFormat::GGML || file_format == FileFormat::GGHF || file_format == FileFormat::GGJT || file_format == FileFormat::GGJT_2  || file_format == FileFormat::GGJT_3)
-    {
-        params.prompt.insert(0, 1, ' ');
-        if(file_format == FileFormat::GGHF || file_format == FileFormat::GGJT || file_format == FileFormat::GGJT_2 )
-        {
-            embd_inp = ::llama_v2_tokenize(llama_ctx_v2, params.prompt, true);
-        }
-        else if (file_format == FileFormat::GGML)
-        {
-            embd_inp = ::legacy_llama_v2_tokenize(llama_ctx_v2, params.prompt, true);
-        }
-        else
-        {
-            embd_inp = ::llama_tokenize(llama_ctx_v3, params.prompt, true);
-        }
-    }
-    else
-    {
-        // tokenize the prompt
-        embd_inp = ::gpt_tokenize(vocab, params.prompt);
-    }
+    TokenizeString(params.prompt, embd_inp, file_format);
 
     //truncate to front of the prompt if its too long
     int32_t nctx = params.n_ctx;
@@ -1004,7 +1143,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
     {
         //for non llama, limit to 256
         int bbs = blasbatchsize;
-        if (file_format != FileFormat::GGML && file_format != FileFormat::GGHF && file_format != FileFormat::GGJT && file_format != FileFormat::GGJT_2 && file_format != FileFormat::GGJT_3)
+        if (file_format != FileFormat::GGML && file_format != FileFormat::GGHF && file_format != FileFormat::GGJT && file_format != FileFormat::GGJT_2 && file_format != FileFormat::GGJT_3 && file_format != FileFormat::GGUF_LLAMA && file_format!=FileFormat::GGUF_FALCON)
         {
             bbs = (blasbatchsize > 256 ? 256 : blasbatchsize);
         }
@@ -1062,7 +1201,11 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
     }
     else if(file_format == FileFormat::GGJT_3)
     {
-        n_vocab = llama_n_vocab(llama_ctx_v3);
+        n_vocab = llama_v3_n_vocab(llama_ctx_v3);
+    }
+    else if(file_format == FileFormat::GGUF_LLAMA || file_format==FileFormat::GGUF_FALCON)
+    {
+        n_vocab = llama_n_vocab(llama_ctx_v4);
     }
     else if (file_format == FileFormat::GPTJ_1 || file_format == FileFormat::GPTJ_2)
     {
@@ -1183,7 +1326,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
         }
         ::utreplace(tmp, "\n", "\\n");
         outstr += tmp;
-        printf("%s\n\n", outstr.c_str());
+        printf("%s\n\n", RemoveBell(outstr).c_str());
     }
 
     while (remaining_tokens > 0)
@@ -1209,7 +1352,11 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
             }
             else if(file_format == FileFormat::GGJT_3)
             {
-                evalres = (llama_eval(llama_ctx_v3, embd.data(), embdsize, n_past, params.n_threads)==0);
+                evalres = (llama_v3_eval(llama_ctx_v3, embd.data(), embdsize, n_past, params.n_threads)==0);
+            }
+            else if(file_format == FileFormat::GGUF_LLAMA || file_format==FileFormat::GGUF_FALCON)
+            {
+                evalres = (llama_eval(llama_ctx_v4, embd.data(), embdsize, n_past, params.n_threads)==0);
             }
             else if(file_format==FileFormat::RWKV_1 || file_format==FileFormat::RWKV_2)
             {
@@ -1315,37 +1462,44 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
             unsigned int eosID = 0;
             float * logitsPtr;
             int btsize = banned_token_ids.size();
-            if(file_format == FileFormat::GGML || file_format == FileFormat::GGHF || file_format == FileFormat::GGJT || file_format == FileFormat::GGJT_2 || file_format == FileFormat::GGJT_3)
+            if(file_format == FileFormat::GGML || file_format == FileFormat::GGHF || file_format == FileFormat::GGJT || file_format == FileFormat::GGJT_2 || file_format == FileFormat::GGJT_3 || file_format == FileFormat::GGUF_LLAMA || file_format==FileFormat::GGUF_FALCON)
             {
-                if(file_format == FileFormat::GGJT_3)
+                if(file_format == FileFormat::GGUF_LLAMA || file_format==FileFormat::GGUF_FALCON)
                 {
-                    logitsPtr = llama_get_logits(llama_ctx_v3);
+                    logitsPtr = llama_get_logits(llama_ctx_v4);
+                    eosID = llama_token_eos(llama_ctx_v4);
+                }
+                else if(file_format == FileFormat::GGJT_3)
+                {
+                    logitsPtr = llama_v3_get_logits(llama_ctx_v3);
+                    eosID = llama_v3_token_eos();
                 }
                 else
                 {
                     logitsPtr = llama_v2_get_logits(llama_ctx_v2);
+                    eosID = llama_v3_token_eos();
                 }
 
-                eosID = llama_token_eos();
-
-                if (!unbanTokens)
+                float lowestLogit = LowestLogit(logitsPtr,n_vocab);
+                if (!unbanTokens && !inputs.unban_tokens_rt)
                 {
-                    // set the logit of the eos token (2) to zero to avoid sampling it
-                    logitsPtr[eosID] = 0;
+                    // set the logit of the eos token (2) to -INF to avoid sampling it
+                    logitsPtr[eosID] = lowestLogit;
                 }
 
                 if(btsize>0)
                 {
                     for(int t=0;t<btsize;++t)
                     {
-                        logitsPtr[banned_token_ids[t]]=0;
+                        logitsPtr[banned_token_ids[t]]=lowestLogit;
                     }
                 }
             }
             else
             {
                 logitsPtr = logits.data();
-                if (!unbanTokens)
+                float lowestLogit = LowestLogit(logits);
+                if (!unbanTokens && !inputs.unban_tokens_rt)
                 {
                     //gpt2 uses negative logits, so we cant zero it
                     // set the logit of the eos token to minimum to avoid sampling it
@@ -1360,10 +1514,10 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                          file_format == FileFormat::GPTJ_5)
                     {
                         eosID = 50256;
+
                         if(logits.size() > eosID)
                         {
-                            int topid = std::min_element(logits.begin(),logits.end())-logits.begin();
-                            logits[eosID] = (logits[topid] < 0 ? logits[topid] : 0);
+                            logits[eosID] = lowestLogit;
                         }
                         else
                         {
@@ -1371,8 +1525,8 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                             if (file_format == FileFormat::GPT2_3 || file_format == FileFormat::GPT2_4)
                             {
                                 eosID = 0;
-                                int topid = std::min_element(logits.begin(), logits.end()) - logits.begin();
-                                logits[eosID] = (logits[topid] < 0 ? logits[topid] : 0);
+                                logits[eosID] = lowestLogit;
+
                             }
                         }
                     }
@@ -1390,17 +1544,15 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                          file_format == FileFormat::MPT_1)
                     {
                         eosID = 0;
-                        int topid = std::min_element(logits.begin(),logits.end())-logits.begin();
-                        logits[eosID] = (logits[topid] < 0 ? logits[topid] : 0);
+                        logits[eosID] = lowestLogit;
                     }
                 }
 
                 if(btsize>0)
                 {
-                    int topid = std::min_element(logits.begin(), logits.end()) - logits.begin();
                     for (int t = 0; t < btsize; ++t)
                     {
-                        logits[banned_token_ids[t]] = (logits[topid] < 0 ? logits[topid] : 0);
+                        logits[banned_token_ids[t]] = lowestLogit;
                     }
                 }
             }
@@ -1426,7 +1578,9 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                 {
                     generated_tokens.push_back(tokenizedstr);
                 }
+                concat_output_mtx.lock();
                 concat_output += tokenizedstr;
+                concat_output_mtx.unlock();
             }
 
             if (startedsampling && debugmode!=-1)
@@ -1446,12 +1600,12 @@ generation_outputs gpttype_generate(const generation_inputs inputs, generation_o
                     firstloop = false;
                     std::string tokenizedstr = FileFormatTokenizeID(pick.id, file_format);
                     ::utreplace(tokenizedstr, "\n", "\\n");
-                    printf("(%s %.2f%%)", tokenizedstr.c_str(), pick.p*100);
+                    printf("(%s %.2f%%)", RemoveBell(tokenizedstr).c_str(), pick.p*100);
                 }
                 printf("]\n");
             }
 
-            if(unbanTokens && id==eosID)
+            if((unbanTokens||inputs.unban_tokens_rt) && id==eosID)
             {
                 stopper_unused_tokens = remaining_tokens;
                 printf("\n(EOS token triggered!)");

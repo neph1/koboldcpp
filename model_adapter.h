@@ -21,6 +21,7 @@ enum FileFormat
     GGJT=3, // 3=(llama ggjt)
     GGJT_2=4, //newer llama format unshuffled
     GGJT_3=5, //using 16bit scalar
+    GGUF_LLAMA=6, //GGUF (llama newest ver)
 
     GPTJ_1=100, //the very first super old GPTJ format
     GPTJ_2=101, //pygmalion, uses old ggml lib
@@ -45,6 +46,14 @@ enum FileFormat
     NEOX_7=406, //using 16bit scalar redpajama
 
     MPT_1=500, //first supported mpt version
+
+    GGUF_FALCON=600, //GGUF (falcon)
+
+};
+
+struct FileFormatExtraMeta
+{
+    int n_ctx_train = 2048;
 };
 
 enum ModelLoadResult
@@ -54,10 +63,11 @@ enum ModelLoadResult
     RETRY_LOAD = 2, //used if it's suspected that the model is an older format
 };
 
-ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in_file_format);
+ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in_file_format, FileFormatExtraMeta file_format_meta);
 generation_outputs gpttype_generate(const generation_inputs inputs, generation_outputs &output);
 bool gpttype_generate_abort();
 const std::string & gpttype_get_pending_output();
+int gpttype_token_count(const std::string & input);
 
 void timer_start();
 double timer_check();
@@ -68,7 +78,7 @@ std::vector<int> LongestCommonSubseq(const std::vector<int> x, const std::vector
 bool ArrStartWith(const std::vector<int> targetArray, const std::vector<int> searchSeq);
 int ArrFindIndexOf(const std::vector<int> targetArray, const std::vector<int> searchSeq);
 
-FileFormat check_file_format(const std::string & fname);
+FileFormat check_file_format(const std::string & fname, FileFormatExtraMeta * fileformatmeta);
 void ContextFastForward(std::vector<int> &current_context_tokens, std::vector<int> &embd_inp,
  int &n_past, std::vector<int> &last_n_tokens, const int nctx, std::vector<int> &smartcontext,
  const bool useSmartContext, const bool requireFullSubset);

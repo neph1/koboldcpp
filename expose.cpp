@@ -27,6 +27,7 @@ extern "C"
 
     //return val: 0=fail, 1=(original ggml, alpaca), 2=(ggmf), 3=(ggjt)
     static FileFormat file_format = FileFormat::BADFORMAT;
+    static FileFormatExtraMeta file_format_meta;
 
     bool load_model(const load_model_inputs inputs)
     {
@@ -36,11 +37,9 @@ extern "C"
 
         int forceversion = inputs.forceversion;
 
-        if(forceversion==0)
-        {
-            file_format = check_file_format(model.c_str());
-        }
-        else
+        file_format = check_file_format(model.c_str(),&file_format_meta);
+
+        if(forceversion!=0)
         {
             printf("\nWARNING: FILE FORMAT FORCED TO VER %d\nIf incorrect, loading may fail or crash.\n",forceversion);
             file_format = (FileFormat)forceversion;
@@ -64,7 +63,7 @@ extern "C"
         if(file_format==FileFormat::GPTJ_1 || file_format==FileFormat::GPTJ_2 || file_format==FileFormat::GPTJ_3 || file_format==FileFormat::GPTJ_4  || file_format==FileFormat::GPTJ_5)
         {
             printf("\n---\nIdentified as GPT-J model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-            ModelLoadResult lr = gpttype_load_model(inputs, file_format);
+            ModelLoadResult lr = gpttype_load_model(inputs, file_format, file_format_meta);
             if (lr == ModelLoadResult::RETRY_LOAD)
             {
                 if(file_format==FileFormat::GPTJ_1)
@@ -73,14 +72,14 @@ extern "C"
                     //otherwise if we tried 3 first, then try 2
                     file_format = FileFormat::GPTJ_4;
                     printf("\n---\nRetrying as GPT-J model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-                    lr = gpttype_load_model(inputs, file_format);
+                    lr = gpttype_load_model(inputs, file_format, file_format_meta);
                 }
 
                 if (lr == ModelLoadResult::RETRY_LOAD)
                 {
                     file_format = FileFormat::GPTJ_3;
                     printf("\n---\nRetrying as GPT-J model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-                    lr = gpttype_load_model(inputs, file_format);
+                    lr = gpttype_load_model(inputs, file_format, file_format_meta);
                 }
 
                 //lastly try format 2
@@ -88,7 +87,7 @@ extern "C"
                 {
                     file_format = FileFormat::GPTJ_2;
                     printf("\n---\nRetrying as GPT-J model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-                    lr = gpttype_load_model(inputs, file_format);
+                    lr = gpttype_load_model(inputs, file_format, file_format_meta);
                 }
             }
 
@@ -104,32 +103,19 @@ extern "C"
         else if(file_format==FileFormat::GPT2_1||file_format==FileFormat::GPT2_2||file_format==FileFormat::GPT2_3||file_format==FileFormat::GPT2_4)
         {
             printf("\n---\nIdentified as GPT-2 model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-            ModelLoadResult lr = gpttype_load_model(inputs, file_format);
+            ModelLoadResult lr = gpttype_load_model(inputs, file_format, file_format_meta);
             if (lr == ModelLoadResult::RETRY_LOAD)
             {
                 file_format = FileFormat::GPT2_3;
                 printf("\n---\nRetrying as GPT-2 model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-                lr = gpttype_load_model(inputs, file_format);
+                lr = gpttype_load_model(inputs, file_format, file_format_meta);
             }
             if (lr == ModelLoadResult::RETRY_LOAD)
             {
                 file_format = FileFormat::GPT2_2;
                 printf("\n---\nRetrying as GPT-2 model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-                lr = gpttype_load_model(inputs, file_format);
+                lr = gpttype_load_model(inputs, file_format, file_format_meta);
             }
-            if (lr == ModelLoadResult::FAIL || lr == ModelLoadResult::RETRY_LOAD)
-            {
-                return false;
-            }
-            else
-            {
-                return true;
-            }
-        }
-        else if(file_format==FileFormat::RWKV_1 || file_format==FileFormat::RWKV_2)
-        {
-            printf("\n---\nIdentified as RWKV model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-            ModelLoadResult lr = gpttype_load_model(inputs, file_format);
             if (lr == ModelLoadResult::FAIL || lr == ModelLoadResult::RETRY_LOAD)
             {
                 return false;
@@ -142,41 +128,28 @@ extern "C"
         else if(file_format==FileFormat::NEOX_1 || file_format==FileFormat::NEOX_2 || file_format==FileFormat::NEOX_3 || file_format==FileFormat::NEOX_4 || file_format==FileFormat::NEOX_5 || file_format==FileFormat::NEOX_6 || file_format==FileFormat::NEOX_7)
         {
             printf("\n---\nIdentified as GPT-NEO-X model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-            ModelLoadResult lr = gpttype_load_model(inputs, file_format);
+            ModelLoadResult lr = gpttype_load_model(inputs, file_format, file_format_meta);
             if (lr == ModelLoadResult::RETRY_LOAD)
             {
                 if(file_format==FileFormat::NEOX_2)
                 {
                     file_format = FileFormat::NEOX_3;
                     printf("\n---\nRetrying as GPT-NEO-X model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-                    lr = gpttype_load_model(inputs, file_format);
+                    lr = gpttype_load_model(inputs, file_format, file_format_meta);
                 }
                 else
                 {
                     file_format = FileFormat::NEOX_5;
                     printf("\n---\nRetrying as GPT-NEO-X model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-                    lr = gpttype_load_model(inputs, file_format);
+                    lr = gpttype_load_model(inputs, file_format, file_format_meta);
                 }
             }
             if (lr == ModelLoadResult::RETRY_LOAD)
             {
                 file_format = FileFormat::NEOX_1;
                 printf("\n---\nRetrying as GPT-NEO-X model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-                lr = gpttype_load_model(inputs, file_format);
+                lr = gpttype_load_model(inputs, file_format, file_format_meta);
             }
-            if (lr == ModelLoadResult::FAIL || lr == ModelLoadResult::RETRY_LOAD)
-            {
-                return false;
-            }
-            else
-            {
-                return true;
-            }
-        }
-        else if(file_format==FileFormat::MPT_1)
-        {
-            printf("\n---\nIdentified as MPT model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-            ModelLoadResult lr = gpttype_load_model(inputs, file_format);
             if (lr == ModelLoadResult::FAIL || lr == ModelLoadResult::RETRY_LOAD)
             {
                 return false;
@@ -188,8 +161,23 @@ extern "C"
         }
         else
         {
-            printf("\n---\nIdentified as LLAMA model: (ver %d)\nAttempting to Load...\n---\n", file_format);
-            ModelLoadResult lr = gpttype_load_model(inputs, file_format);
+            if(file_format==FileFormat::MPT_1)
+            {
+                printf("\n---\nIdentified as MPT model: (ver %d)\nAttempting to Load...\n---\n", file_format);
+            }
+            else if(file_format==FileFormat::RWKV_1 || file_format==FileFormat::RWKV_2)
+            {
+                printf("\n---\nIdentified as RWKV model: (ver %d)\nAttempting to Load...\n---\n", file_format);
+            }
+            else if(file_format==FileFormat::GGUF_FALCON)
+            {
+                printf("\n---\nIdentified as FALCON model: (ver %d)\nAttempting to Load...\n---\n", file_format);
+            }
+            else
+            {
+                printf("\n---\nIdentified as LLAMA model: (ver %d)\nAttempting to Load...\n---\n", file_format);
+            }
+            ModelLoadResult lr = gpttype_load_model(inputs, file_format, file_format_meta);
             if (lr == ModelLoadResult::FAIL || lr == ModelLoadResult::RETRY_LOAD)
             {
                 return false;
@@ -239,5 +227,11 @@ extern "C"
 
     bool abort_generate() {
         return gpttype_generate_abort();
+    }
+
+    int token_count(const char * input)
+    {
+        std::string inputstr = input;
+        return gpttype_token_count(inputstr);
     }
 }

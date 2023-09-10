@@ -335,7 +335,11 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
         const auto & hparams = model.hparams;
         size_t vram_total = 0;
         const int n_gpu = std::min(gpulayers, int(hparams.n_layer));
-        fprintf(stderr, "%s: [GPU] offloading %d layers to GPU\n", __func__, n_gpu);
+        #if defined(GGML_USE_CLBLAST)
+        fprintf(stderr, "%s: [opencl] offloading %d layers to GPU\n", __func__, n_gpu);
+        #else
+        fprintf(stderr, "%s: [CUDA] offloading %d layers to GPU\n", __func__, n_gpu);
+        #endif
         for (int i = 0; i < n_gpu; ++i) {
             const auto & layer = model.layers[i];
             layer.c_attn_attn_w->backend = GGML_BACKEND_GPU;
@@ -354,7 +358,11 @@ ModelLoadResult gpt_neox_model_load(const std::string & fname, gpt_neox_model & 
             ggml_cuda_transform_tensor(layer.c_mlp_proj_w->data,layer.c_mlp_proj_w); vram_total += ggml_nbytes(layer.c_mlp_proj_w);
             #endif
         }
-        fprintf(stderr, "%s: [GPU] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
+        #if defined(GGML_USE_CLBLAST)
+            fprintf(stderr, "%s: [opencl] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
+        #else
+            fprintf(stderr, "%s: [CUDA] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
+        #endif
     }
     #endif
 
@@ -367,7 +375,7 @@ ggml_tensor * gpt_neox_ff(
         const gpt_neox_layer &layer,
         ggml_context * ctx0,
         ggml_tensor * inp) {
-    ggml_tensor * cur = ggml_norm(ctx0, inp);
+    ggml_tensor * cur = ggml_norm(ctx0, inp, default_norm_eps);
 
     cur = ggml_add(ctx0,
         ggml_mul(ctx0,
@@ -481,7 +489,7 @@ bool gpt_neox_eval(
         // self-attention
         {
             {
-                cur = ggml_norm(ctx0, inpL);
+                cur = ggml_norm(ctx0, inpL, default_norm_eps);
 
                 cur = ggml_add(ctx0,
                         ggml_mul(ctx0,
@@ -613,7 +621,7 @@ bool gpt_neox_eval(
 
     // norm
     {
-        inpL = ggml_norm(ctx0, inpL);
+        inpL = ggml_norm(ctx0, inpL, default_norm_eps);
 
         // inpL = ln_f_g*inpL + ln_f_b
         inpL = ggml_add(ctx0,
