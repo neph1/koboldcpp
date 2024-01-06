@@ -1,5 +1,4 @@
-import json
-import urllib.request
+import requests
 from extension import ExtensionInterface
 
 
@@ -21,7 +20,7 @@ class web_search(ExtensionInterface):
         query = response.split('[search:')[1].split(']')[0].strip()
         query = query.replace(' ', '+')
         print(f'query: {query}')
-        json_object = json.loads(urllib.request.urlopen(f'https://api.duckduckgo.com/?q={query}&format=json').read())
+        json_object = requests.get(f'https://api.duckduckgo.com/?q={query}&format=json').json()
         result = json_object['Abstract'] if len(json_object['Abstract']) > 0 else json_object['RelatedTopics'][0]['Text']
         result_length = len(result)
         max_new_prompt = max_context-result_length
